@@ -62,6 +62,79 @@ async function run(
   }
 }
 
+function printOverview(): void {
+  process.stdout.write(`
+godot-cli — like Playwright, but for the Godot game engine
+===========================================================
+Control a running Godot 4.6+ game from the command line.
+All commands output JSON. Requires the GodotCLI addon enabled in your Godot project.
+
+Options: --host <host> (default: localhost)  --port <port> (default: 9900)
+
+SCENE TREE
+  scene-tree [--depth N] [--root PATH]      Get the scene tree hierarchy
+  load-scene <path>                         Load/change to a scene (res://...)
+  save-scene [--path PATH]                  Save current scene to .tscn file
+
+NODE OPERATIONS
+  get-node <path>                           Get ALL properties of a node
+  set-property <path> <prop> <value>        Set a property (supports Vector2, Color, etc.)
+  add-node <parent> <type> [--name N]       Create a node (e.g. Node2D, Sprite2D)
+  remove-node <path>                        Remove a node from the tree
+  rename-node <path> <name>                 Rename a node
+  reparent-node <path> <new-parent>         Move a node to a new parent
+  call-method <path> <method> [args...]     Call any method on a node
+
+SCRIPTS
+  attach-script <node> <script>             Attach a .gd or .cs script to a node
+  detach-script <node>                      Remove script from a node
+
+GDSCRIPT EXECUTION
+  eval <code>                               Run GDScript in the live game (single expr auto-returns)
+
+INPUT SIMULATION
+  click <x> <y> [--button left|right]       Simulate mouse click at coordinates
+  press-key <key> [--shift] [--ctrl] [--alt]  Simulate key press (Space, A, Escape, Up...)
+  mouse-move <x> <y>                        Move mouse to position
+
+CAPTURE
+  screenshot [--output file.png]            Capture the game viewport to PNG
+
+FILE OPERATIONS
+  create-file <path> --content "..."        Write a file in the Godot project
+  read-file <path>                          Read a project file
+  list-files [path] [--pattern *.gd]        List files in a project directory
+  delete-file <path>                        Delete a project file
+
+CLASS REFERENCE
+  list-classes [--filter X] [--base Y]      List instantiable Godot engine classes
+  class-info <class>                        Get properties, methods, signals for a class
+
+VERIFICATION & TESTING
+  wait-for <expr> [--timeout 10]            Wait until a GDScript expression becomes true
+  assert <expr>                             Assert condition is true (exit 1 on failure)
+  assert --path P --property X --equals V   Assert a node property value
+  assert --exists <path>                    Assert a node exists in the tree
+  assert --not-exists <path>                Assert a node does NOT exist
+  validate-scene                            Structural lint (missing shapes, cameras, textures...)
+  viewport-info                             FPS, draw calls, memory, node count, engine version
+  visible-nodes [--type Sprite2D]           List nodes currently visible in the viewport
+
+QUICK START
+  1. Copy godot-addon/addons/godot_cli/ into your Godot project's addons/ folder
+  2. Enable the GodotCLI plugin in Project Settings > Plugins
+  3. Run your game — server starts on port 9900
+  4. Run: godot-cli scene-tree
+
+VALUE FORMATS
+  Primitives:    true, 42, 3.14, "hello"
+  Godot types:   "Vector2(100, 200)", "Color(1, 0, 0, 1)", "Rect2(0, 0, 64, 64)"
+  JSON objects:  '{"_type": "Vector2", "x": 100, "y": 200}'
+
+Run 'godot-cli <command> --help' for detailed usage of any command.
+`);
+}
+
 function readStdin(): Promise<string> {
   return new Promise((resolve) => {
     let data = "";
@@ -552,5 +625,10 @@ program
   });
 
 // ---------------------------------------------------------------------------
+
+// Show overview when no command is given
+program.action(() => {
+  printOverview();
+});
 
 program.parse();
