@@ -1,4 +1,8 @@
-# godot-cli
+# Ultimate Odycer Godot Runtime CLI
+
+> Hardened local fork of [mattias800/godot-cli](https://github.com/mattias800/godot-cli).
+> It is a development/testing tool, not a gameplay dependency. The fork uses
+> the `uo-godot-cli` executable to avoid the unrelated `godot-cli` npm package.
 
 A CLI tool for controlling the Godot game engine — like [Playwright](https://playwright.dev/), but for games.
 
@@ -13,29 +17,97 @@ Two components:
 
 ```
 ┌─────────────┐     TCP/JSON     ┌──────────────────┐
-│  godot-cli   │ ──────────────> │  Godot Game       │
+│ uo-godot-cli │ ──────────────> │  Godot Game       │
 │  (Node.js)   │ <────────────── │  (cli_server.gd)  │
 └─────────────┘   localhost:9900 └──────────────────┘
 ```
 
 ## Setup
 
-### 1. Install the CLI
+### 1. Build the local CLI
 
 ```bash
-npm install -g godot-cli
-# or use locally
 npm install
 npm run build
+npm link
 ```
 
-### 2. Add the Godot addon
+The examples below retain the upstream `godot-cli` spelling for readability.
+For this fork, replace that executable with `uo-godot-cli`; invoking the bare
+`godot-cli` command may run the unrelated Godot-MCP npm package installed on
+the workstation.
 
-Copy the `godot-addon/addons/godot_cli/` folder into your Godot project's `addons/` directory:
+### Security prerequisites
+
+Set a fresh token of at least 32 characters **before launching Godot** and in
+the terminal running the CLI:
+
+```powershell
+$env:GODOT_CLI_TOKEN = '<fresh-random-token>'
+```
+
+The server binds only to `127.0.0.1`, refuses release builds, limits message
+and file sizes, caps concurrent clients at eight, expires unauthenticated
+connections after two seconds, bounds scene traversal/assertion batches, and
+starts in read-only mode. The client revalidates
+`localhost` DNS answers, caps outgoing requests, decodes split UTF-8 safely,
+and verifies each response ID and status. Optional capabilities must be
+enabled before launching Godot:
+
+```powershell
+$env:GODOT_CLI_ALLOW_MUTATIONS = '1' # scene/runtime mutations and input
+$env:GODOT_CLI_ALLOW_UNSAFE = '1'    # eval, method calls, script/file writes
+```
+
+See [SECURITY.md](SECURITY.md) for the enforced boundary.
+
+### Compatibility doctor
+
+Run the authenticated compatibility gate after Godot starts:
 
 ```bash
-cp -r godot-addon/addons/godot_cli /path/to/your/godot-project/addons/
+uo-godot-cli doctor
 ```
+
+It fails closed unless the addon version and protocol match, Godot 4.7 is
+running as a debug build on loopback, and mutation/unsafe gates are disabled.
+For an intentionally elevated development session, acknowledge that state:
+
+```bash
+uo-godot-cli doctor --allow-elevated
+```
+
+### Validation status
+
+The P0 suite (version `0.1.0-uo.4`) passes 29/29 checks: seven isolated installer/status
+controls, the Node protocol and security invariant controls, and four headless
+runtime scenarios with Godot 4.7-dev5 against the isolated addon fixture. `validate-scene`
+is fail-closed: it enforces a 4,096-node and 64-depth budget, returning `complete: false`,
+`valid: false`, and a `validation_budget_exceeded` error when truncated. This is a real
+CLI/addon protocol proof, not yet proof of integration into the canonical Ultimate Odycer
+client; that step remains `[Scaffolding / Proxy]`.
+
+### 2. Inspect and install the Godot addon
+
+Inspect the project first. This command is read-only and does not require the
+runtime token:
+
+```bash
+uo-godot-cli addon status /path/to/your/godot-project
+```
+
+Preview the installation, then apply it after reviewing the JSON result:
+
+```bash
+uo-godot-cli addon install /path/to/your/godot-project --dry-run
+uo-godot-cli addon install /path/to/your/godot-project
+```
+
+The installer requires a real `project.godot`, copies only into
+`addons/godot_cli`, verifies the bundled files, and does not edit or enable
+anything in `project.godot`. An existing modified copy is refused unless
+`--force` is explicitly supplied. If `godot_ai` is active, status reports the
+overlapping-control-plane warning before activation.
 
 ### 3. Enable the plugin
 
@@ -45,7 +117,7 @@ In Godot: **Project → Project Settings → Plugins** → Enable **GodotCLI**
 
 The TCP server starts automatically when the game runs. You'll see:
 ```
-GodotCLI: Server listening on port 9900
+GodotCLI: Server listening on 127.0.0.1:9900 (read-only mode)
 ```
 
 ## Commands
@@ -270,7 +342,8 @@ When setting properties, you can use:
 
 ## Target
 
-- **Godot 4.6+** (tested with 4.6.1)
+- **Godot 4.7** (automated headless validation with 4.7-dev5; inherited
+  upstream compatibility starts at 4.6)
 - **Node.js 18+**
 
 ## License

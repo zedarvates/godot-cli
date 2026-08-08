@@ -5,6 +5,65 @@ extends Node
 ## Target: Godot 4.6.x
 
 const DEFAULT_PORT := 9900
+const BIND_ADDRESS := "127.0.0.1"
+const PROTOCOL_VERSION := 1
+const ADDON_VERSION := "0.1.0-uo.4"
+const MIN_TOKEN_LENGTH := 32
+const MAX_MESSAGE_BYTES := 1024 * 1024
+const MAX_RESPONSE_BYTES := 16 * 1024 * 1024
+const MAX_FILE_BYTES := 4 * 1024 * 1024
+const MAX_DIRECTORY_ENTRIES := 4096
+const MAX_CLIENTS := 8
+const AUTH_TIMEOUT_MSEC := 2000
+const MAX_PENDING_WAITS := 8
+const MAX_WAIT_TIMEOUT_SECONDS := 300.0
+const MIN_WAIT_INTERVAL_SECONDS := 0.01
+const MAX_WAIT_INTERVAL_SECONDS := 5.0
+const MAX_SCENE_TREE_DEPTH := 64
+const MAX_SCENE_NODES := 4096
+const MAX_VISIBLE_NODES := 4096
+const MAX_ASSERT_CHECKS := 256
+
+const READ_ONLY_COMMANDS := {
+	"server_info": true,
+	"scene_tree": true,
+	"get_node": true,
+	"screenshot": true,
+	"read_file": true,
+	"list_files": true,
+	"list_classes": true,
+	"class_info": true,
+	"wait_for": true,
+	"assert": true,
+	"validate_scene": true,
+	"viewport_info": true,
+	"visible_nodes": true,
+}
+
+const MUTATING_COMMANDS := {
+	"set_property": true,
+	"add_node": true,
+	"remove_node": true,
+	"reparent_node": true,
+	"rename_node": true,
+	"click": true,
+	"press_key": true,
+	"mouse_move": true,
+	"load_scene": true,
+}
+
+const UNSAFE_COMMANDS := {
+	"call_method": true,
+	"eval": true,
+	"create_file": true,
+	"delete_file": true,
+	"attach_script": true,
+}
+
+var _auth_token := ""
+var _allow_mutations := false
+var _allow_unsafe := false
+var _listen_port := DEFAULT_PORT
 
 var _server: TCPServer = null
 var _clients: Array[Dictionary] = []
@@ -13,17 +72,49 @@ var _pending_waits: Array[Dictionary] = []
 # --- Lifecycle ---
 
 func _ready() -> void:
+	if not OS.is_debug_build():
+		push_error("GodotCLI: Refusing to start outside an editor or debug build")
+		set_process(false)
+		return
+
+	_auth_token = OS.get_environment("GODOT_CLI_TOKEN").strip_edges()
+	if _auth_token.length() < MIN_TOKEN_LENGTH:
+		push_error("GodotCLI: GODOT_CLI_TOKEN must contain at least %d characters" % MIN_TOKEN_LENGTH)
+		set_process(false)
+		return
+
+	_allow_mutations = _env_flag_enabled("GODOT_CLI_ALLOW_MUTATIONS")
+	_allow_unsafe = _env_flag_enabled("GODOT_CLI_ALLOW_UNSAFE")
+
 	var port := DEFAULT_PORT
+	var env_port := OS.get_environment("GODOT_CLI_PORT").strip_edges()
+	if env_port.is_valid_int():
+		port = env_port.to_int()
 	for arg in OS.get_cmdline_args():
 		if arg.begins_with("--godot-cli-port="):
 			port = int(arg.split("=")[1])
+	if port < 1 or port > 65535:
+		push_error("GodotCLI: Invalid port %d" % port)
+		set_process(false)
+		return
 
 	_server = TCPServer.new()
-	var err := _server.listen(port)
+	var err := _server.listen(port, BIND_ADDRESS)
 	if err != OK:
-		push_error("GodotCLI: Failed to listen on port %d: %s" % [port, error_string(err)])
+		push_error("GodotCLI: Failed to listen on %s:%d: %s" % [BIND_ADDRESS, port, error_string(err)])
 		return
-	print("GodotCLI: Server listening on port %d" % port)
+	_listen_port = port
+	var mode := "read-only"
+	if _allow_unsafe:
+		mode = "unsafe"
+	elif _allow_mutations:
+		mode = "mutating"
+	print("GodotCLI: Server listening on %s:%d (%s mode)" % [BIND_ADDRESS, port, mode])
+
+
+func _env_flag_enabled(name: String) -> bool:
+	var value := OS.get_environment(name).strip_edges().to_lower()
+	return value == "1" or value == "true" or value == "yes" or value == "on"
 
 
 func _process(_delta: float) -> void:
@@ -100,10 +191,58 @@ func _send(client: Dictionary, response: Dictionary) -> void:
 	var peer: StreamPeerTCP = client["peer"]
 	peer.put_data(json.to_utf8_buffer())
 
+func _sorted_command_names(commands: Dictionary) -> Array[String]:
+	var names: Array[String] = []
+	for command in commands.keys():
+		names.append(str(command))
+	names.sort()
+	return names
+
+
+func _cmd_server_info(_params: Dictionary) -> Dictionary:
+	return {"status": "ok", "data": {
+		"protocol_version": PROTOCOL_VERSION,
+		"addon_version": ADDON_VERSION,
+		"engine": Engine.get_version_info(),
+		"renderer": RenderingServer.get_current_rendering_method(),
+		"debug_build": OS.is_debug_build(),
+		"endpoint": {
+			"bind_address": BIND_ADDRESS,
+			"port": _listen_port,
+		},
+		"gates": {
+			"mutations_enabled": _allow_mutations,
+			"unsafe_enabled": _allow_unsafe,
+		},
+		"limits": {
+			"max_request_bytes": MAX_MESSAGE_BYTES,
+			"max_response_bytes": MAX_RESPONSE_BYTES,
+			"max_file_bytes": MAX_FILE_BYTES,
+			"max_directory_entries": MAX_DIRECTORY_ENTRIES,
+			"max_clients": MAX_CLIENTS,
+			"authentication_timeout_ms": AUTH_TIMEOUT_MSEC,
+			"max_pending_waits": MAX_PENDING_WAITS,
+			"max_wait_timeout_seconds": MAX_WAIT_TIMEOUT_SECONDS,
+			"min_wait_interval_seconds": MIN_WAIT_INTERVAL_SECONDS,
+			"max_wait_interval_seconds": MAX_WAIT_INTERVAL_SECONDS,
+			"max_scene_tree_depth": MAX_SCENE_TREE_DEPTH,
+			"max_scene_nodes": MAX_SCENE_NODES,
+			"max_visible_nodes": MAX_VISIBLE_NODES,
+			"max_assert_checks": MAX_ASSERT_CHECKS,
+		},
+		"commands": {
+			"read_only": _sorted_command_names(READ_ONLY_COMMANDS),
+			"mutating": _sorted_command_names(MUTATING_COMMANDS),
+			"unsafe": _sorted_command_names(UNSAFE_COMMANDS),
+		},
+	}}
+
+
 # --- Command Dispatch ---
 
 func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: String = "") -> Variant:
 	match command:
+		"server_info": return _cmd_server_info(params)
 		"scene_tree": return _cmd_scene_tree(params)
 		"get_node": return _cmd_get_node(params)
 		"set_property": return _cmd_set_property(params)
@@ -510,9 +649,9 @@ func _cmd_call_method(params: Dictionary) -> Dictionary:
 # --- Eval ---
 
 func _cmd_eval(params: Dictionary) -> Dictionary:
-	var code: String = params.get("code", "")
+	var code: String = params.get("code", params.get("expression", ""))
 	if code.is_empty():
-		return {"status": "error", "error": "Missing 'code' parameter"}
+		return {"status": "error", "error": "Missing 'code' or 'expression' parameter"}
 
 	var script := GDScript.new()
 	var lines := code.split("\n")
@@ -1124,12 +1263,26 @@ func _cmd_validate_scene(_params: Dictionary) -> Dictionary:
 
 	var errors: Array = []
 	var warnings: Array = []
+	var traversal := {
+		"visited": 0,
+		"truncated": false,
+		"cameras_2d": [],
+		"cameras_3d": [],
+	}
 
-	_validate_recursive(root, errors, warnings)
-	_validate_cameras(root, errors, warnings)
+	_validate_recursive(root, errors, warnings, 0, traversal)
+	_validate_cameras(traversal["cameras_2d"], traversal["cameras_3d"], warnings)
+	if bool(traversal["truncated"]):
+		errors.append({
+			"rule": "validation_budget_exceeded",
+			"message": "Scene validation stopped after %d nodes or %d levels" % [MAX_SCENE_NODES, MAX_SCENE_TREE_DEPTH],
+		})
 
 	return {"status": "ok", "data": {
 		"valid": errors.is_empty(),
+		"complete": not bool(traversal["truncated"]),
+		"visited_nodes": traversal["visited"],
+		"max_nodes": MAX_SCENE_NODES,
 		"error_count": errors.size(),
 		"warning_count": warnings.size(),
 		"errors": errors,
@@ -1137,17 +1290,35 @@ func _cmd_validate_scene(_params: Dictionary) -> Dictionary:
 	}}
 
 
-func _validate_recursive(node: Node, errors: Array, warnings: Array) -> void:
+func _validate_recursive(
+	node: Node,
+	errors: Array,
+	warnings: Array,
+	depth: int,
+	traversal: Dictionary
+) -> void:
+	if int(traversal["visited"]) >= MAX_SCENE_NODES or depth > MAX_SCENE_TREE_DEPTH:
+		traversal["truncated"] = true
+		return
+	traversal["visited"] = int(traversal["visited"]) + 1
+	if node is Camera2D:
+		(traversal["cameras_2d"] as Array).append(node)
+	elif node is Camera3D:
+		(traversal["cameras_3d"] as Array).append(node)
 	var path := str(node.get_path())
 
 	# Rule: Physics bodies must have collision shapes
 	if node is PhysicsBody2D or node is Area2D:
 		var has_shape := false
-		for child in node.get_children():
+		var child_count := node.get_child_count()
+		for child_index in range(mini(child_count, MAX_SCENE_NODES)):
+			var child := node.get_child(child_index)
 			if child is CollisionShape2D or child is CollisionPolygon2D:
 				has_shape = true
 				break
-		if not has_shape:
+		if child_count > MAX_SCENE_NODES:
+			traversal["truncated"] = true
+		elif not has_shape:
 			errors.append({
 				"rule": "physics_body_needs_shape",
 				"path": path,
@@ -1157,11 +1328,15 @@ func _validate_recursive(node: Node, errors: Array, warnings: Array) -> void:
 
 	if node is PhysicsBody3D or node is Area3D:
 		var has_shape := false
-		for child in node.get_children():
+		var child_count := node.get_child_count()
+		for child_index in range(mini(child_count, MAX_SCENE_NODES)):
+			var child := node.get_child(child_index)
 			if child is CollisionShape3D or child is CollisionPolygon3D:
 				has_shape = true
 				break
-		if not has_shape:
+		if child_count > MAX_SCENE_NODES:
+			traversal["truncated"] = true
+		elif not has_shape:
 			errors.append({
 				"rule": "physics_body_needs_shape",
 				"path": path,
@@ -1250,13 +1425,13 @@ func _validate_recursive(node: Node, errors: Array, warnings: Array) -> void:
 
 	# Recurse
 	for child in node.get_children():
-		_validate_recursive(child, errors, warnings)
+		if bool(traversal["truncated"]):
+			break
+		_validate_recursive(child, errors, warnings, depth + 1, traversal)
 
 
-func _validate_cameras(root: Node, errors: Array, warnings: Array) -> void:
+func _validate_cameras(cameras_2d: Array, cameras_3d: Array, warnings: Array) -> void:
 	# Check 2D cameras
-	var cameras_2d: Array[Camera2D] = []
-	_find_nodes_of_type(root, "Camera2D", cameras_2d)
 	if cameras_2d.size() > 0:
 		var any_current := false
 		for cam in cameras_2d:
@@ -1265,13 +1440,11 @@ func _validate_cameras(root: Node, errors: Array, warnings: Array) -> void:
 				break
 		if not any_current:
 			warnings.append({
-				"rule": "no_current_camera",
-				"message": "Found %d Camera2D nodes but none is current" % cameras_2d.size(),
+				"rule": "no_current_camera_2d",
+				"message": "Scene has Camera2D nodes but none is marked as current",
 			})
 
 	# Check 3D cameras
-	var cameras_3d: Array[Camera3D] = []
-	_find_nodes_of_type(root, "Camera3D", cameras_3d)
 	if cameras_3d.size() > 0:
 		var any_current := false
 		for cam in cameras_3d:
@@ -1280,16 +1453,9 @@ func _validate_cameras(root: Node, errors: Array, warnings: Array) -> void:
 				break
 		if not any_current:
 			warnings.append({
-				"rule": "no_current_camera",
-				"message": "Found %d Camera3D nodes but none is current" % cameras_3d.size(),
+				"rule": "no_current_camera_3d",
+				"message": "Scene has Camera3D nodes but none is marked as current",
 			})
-
-
-func _find_nodes_of_type(node: Node, type_name: String, result: Array) -> void:
-	if node.is_class(type_name):
-		result.append(node)
-	for child in node.get_children():
-		_find_nodes_of_type(child, type_name, result)
 
 # --- Viewport Info ---
 

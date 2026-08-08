@@ -2,18 +2,25 @@
 
 import { Command } from "commander";
 import { GodotClient, type GodotResponse } from "./client.js";
+import { inspectAddon, installAddon } from "./addon.js";
+import {
+  buildDoctorReport,
+  CLI_VERSION,
+  MAX_ASSERT_CHECKS,
+  MAX_SCENE_TREE_DEPTH,
+} from "./doctor.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 const program = new Command();
 
 program
-  .name("godot-cli")
+  .name("uo-godot-cli")
   .description(
     "CLI tool for controlling the Godot game engine — like Playwright, but for games"
   )
-  .version("0.1.0")
-  .option("--host <host>", "Godot server host", "localhost")
+  .version(CLI_VERSION)
+  .option("--host <host>", "Loopback Godot server host", "127.0.0.1")
   .option("--port <port>", "Godot server port", "9900");
 
 // ---------------------------------------------------------------------------
@@ -64,12 +71,21 @@ async function run(
 
 function printOverview(): void {
   process.stdout.write(`
-godot-cli — like Playwright, but for the Godot game engine
+uo-godot-cli — hardened runtime control for Ultimate Odycer
 ===========================================================
-Control a running Godot 4.6+ game from the command line.
+Control a running Godot 4.7 game from the command line.
 All commands output JSON. Requires the GodotCLI addon enabled in your Godot project.
+GODOT_CLI_TOKEN (32+ characters) must be set for both Godot and this CLI.
 
-Options: --host <host> (default: localhost)  --port <port> (default: 9900)
+Options: --host <host> (loopback only)  --port <port> (default: 9900)
+
+ADDON MANAGEMENT
+  addon status <project>                    Inspect installation and coexistence
+  addon install <project> [--dry-run]       Install without enabling the plugin
+  addon install <project> --force           Atomically replace a modified copy
+
+COMPATIBILITY
+  doctor [--allow-elevated]                 Verify protocol, Godot and safety gates
 
 SCENE TREE
   scene-tree [--depth N] [--root PATH]      Get the scene tree hierarchy
@@ -121,17 +137,18 @@ VERIFICATION & TESTING
   visible-nodes [--type Sprite2D]           List nodes currently visible in the viewport
 
 QUICK START
-  1. Copy godot-addon/addons/godot_cli/ into your Godot project's addons/ folder
-  2. Enable the GodotCLI plugin in Project Settings > Plugins
-  3. Run your game — server starts on port 9900
-  4. Run: godot-cli scene-tree
+  1. Run: uo-godot-cli addon install /path/to/project --dry-run
+  2. Run again without --dry-run after reviewing the JSON plan
+  3. Enable the GodotCLI plugin in Project Settings > Plugins
+  4. Run your game — server starts on port 9900
+  5. Run: uo-godot-cli scene-tree
 
 VALUE FORMATS
   Primitives:    true, 42, 3.14, "hello"
   Godot types:   "Vector2(100, 200)", "Color(1, 0, 0, 1)", "Rect2(0, 0, 64, 64)"
   JSON objects:  '{"_type": "Vector2", "x": 100, "y": 200}'
 
-Run 'godot-cli <command> --help' for detailed usage of any command.
+Run 'uo-godot-cli <command> --help' for detailed usage of any command.
 `);
 }
 
@@ -147,6 +164,97 @@ function readStdin(): Promise<string> {
   });
 }
 
+function printLocalResult(value: unknown): void {
+  process.stdout.write(JSON.stringify(value, null, 2) + "\n");
+}
+
+function reportLocalError(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`Error: ${message}\n`);
+  process.exitCode = 1;
+}
+
+async function runDoctor(options: { allowElevated?: boolean }): Promise<void> {
+  const rootOptions = program.opts();
+  const client = new GodotClient({
+    host: rootOptions.host,
+    port: rootOptions.port,
+  });
+  try {
+    const response = await client.send("server_info");
+    if (response.status === "error") {
+      printLocalResult(response);
+      process.exitCode = 1;
+      return;
+    }
+    const report = buildDoctorReport(response.data, {
+      allowElevated: options.allowElevated,
+    });
+    printLocalResult(report);
+    if (report.status !== "ok") process.exitCode = 1;
+  } catch (error) {
+    reportLocalError(error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Compatibility gate
+// ---------------------------------------------------------------------------
+
+program
+  .command("doctor")
+  .description("Verify addon protocol, Godot version and capability gates")
+  .option(
+    "--allow-elevated",
+    "Accept explicitly enabled mutation and unsafe capability gates"
+  )
+  .action(runDoctor);
+
+// ---------------------------------------------------------------------------
+// Addon lifecycle commands (local filesystem only; no runtime token required)
+// ---------------------------------------------------------------------------
+
+const addon = program
+  .command("addon")
+  .description("Inspect or install the bundled GodotCLI addon");
+
+addon
+  .command("status")
+  .description("Inspect addon integrity and coexistence with godot_ai")
+  .argument("<project>", "Godot project directory containing project.godot")
+  .action(async (project: string) => {
+    try {
+      printLocalResult(await inspectAddon(project));
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+addon
+  .command("install")
+  .description("Install the addon without enabling it in project.godot")
+  .argument("<project>", "Godot project directory containing project.godot")
+  .option("--dry-run", "Report the planned action without writing files")
+  .option("--force", "Atomically replace an existing modified addon")
+  .action(
+    async (
+      project: string,
+      options: { dryRun?: boolean; force?: boolean }
+    ) => {
+      try {
+        printLocalResult(
+          await installAddon({
+            project,
+            dryRun: options.dryRun,
+            force: options.force,
+          })
+        );
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
 // ---------------------------------------------------------------------------
 // Scene commands
 // ---------------------------------------------------------------------------
@@ -157,7 +265,19 @@ program
   .option("--depth <depth>", "Maximum depth", "10")
   .option("--root <path>", "Root node path")
   .action(async (opts: { depth: string; root?: string }) => {
-    const params: Record<string, unknown> = { depth: parseInt(opts.depth) };
+    const depth = Number(opts.depth);
+    if (
+      !Number.isInteger(depth) ||
+      depth < 0 ||
+      depth > MAX_SCENE_TREE_DEPTH
+    ) {
+      process.stderr.write(
+        `Error: --depth must be an integer between 0 and ${MAX_SCENE_TREE_DEPTH}\n`
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const params: Record<string, unknown> = { depth };
     if (opts.root) params.root = opts.root;
     await run("scene_tree", params);
   });
@@ -500,8 +620,18 @@ program
         interval: string;
       }
     ) => {
-      const timeout = parseFloat(opts.timeout);
-      const interval = parseFloat(opts.interval);
+      const timeout = Number(opts.timeout);
+      const interval = Number(opts.interval);
+      if (!Number.isFinite(timeout) || timeout <= 0) {
+        process.stderr.write("Error: --timeout must be a positive finite number\n");
+        process.exitCode = 1;
+        return;
+      }
+      if (!Number.isFinite(interval) || interval <= 0) {
+        process.stderr.write("Error: --interval must be a positive finite number\n");
+        process.exitCode = 1;
+        return;
+      }
       const params: Record<string, unknown> = { timeout, interval };
 
       if (expr) {
@@ -555,7 +685,19 @@ program
       const params: Record<string, unknown> = {};
 
       if (opts.checks) {
-        params.checks = JSON.parse(opts.checks);
+        const checks: unknown = JSON.parse(opts.checks);
+        if (!Array.isArray(checks)) {
+          throw new Error("--checks must contain a JSON array");
+        }
+        if (checks.length > MAX_ASSERT_CHECKS) {
+          throw new Error(
+            `--checks supports at most ${MAX_ASSERT_CHECKS} entries`
+          );
+        }
+        if (checks.some((entry) => typeof entry !== "object" || entry === null || Array.isArray(entry))) {
+          throw new Error("--checks entries must be JSON objects");
+        }
+        params.checks = checks;
       } else if (expr) {
         params.expr = expr;
       } else if (opts.exists) {
@@ -631,4 +773,4 @@ program.action(() => {
   printOverview();
 });
 
-program.parse();
+program.parseAsync().catch(reportLocalError);
