@@ -321,6 +321,21 @@ export async function runMcpServer(options: { host?: string; port?: string | num
         required: ["node_path"],
       },
     },
+    {
+      name: "godot_capture_sequence",
+      description: "Capture a multi-frame sequence of viewport screenshots as base64 images.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          count: { type: "number", description: "Number of frames to capture (default 5, max 30)" },
+        },
+      },
+    },
+    {
+      name: "godot_export_project_api",
+      description: "Scan loaded project GDScript scripts and export custom classes, properties, methods, and signals.",
+      inputSchema: { type: "object", properties: {} },
+    },
   ];
 
   const rl = readline.createInterface({
@@ -378,6 +393,8 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_greformer_push_pull": commandName = "greformer_push_pull"; break;
           case "godot_greformer_apply_hotspot": commandName = "greformer_apply_hotspot"; break;
           case "godot_greformer_bake": commandName = "greformer_bake"; break;
+          case "godot_capture_sequence": commandName = "capture_sequence"; break;
+          case "godot_export_project_api": commandName = "export_project_api"; break;
           default:
             sendError(id, -32601, `Unknown tool: ${toolName}`);
             return;

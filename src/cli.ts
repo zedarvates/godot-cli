@@ -973,6 +973,21 @@ program
   });
 
 program
+  .command("capture-sequence")
+  .description("Capture a multi-frame sequence of viewport screenshots as base64 images")
+  .option("--count <count>", "Number of frames to capture (default 5, max 30)", "5")
+  .action(async (opts: { count: string }) => {
+    await run("capture_sequence", { count: parseInt(opts.count, 10) });
+  });
+
+program
+  .command("export-project-api")
+  .description("Scan loaded project GDScript scripts and export custom classes, properties, methods, and signals")
+  .action(async () => {
+    await run("export_project_api", {});
+  });
+
+program
   .command("init-mcp")
   .description("Generate or update .mcp.json snippet to register godot-cli-mcp server")
   .action(async () => {

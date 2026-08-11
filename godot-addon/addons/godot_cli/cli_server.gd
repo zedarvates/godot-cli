@@ -157,6 +157,8 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"query_path_3d": return _cmd_query_path_3d(params)
 		"set_shader_param": return _cmd_set_shader_param(params)
 		"play_animation": return _cmd_play_animation(params)
+		"capture_sequence": return _cmd_capture_sequence(params)
+		"export_project_api": return _cmd_export_project_api(params)
 		_: return {"status": "error", "error": "Unknown command: " + command}
 
 # ============================================================
@@ -1856,6 +1858,47 @@ func _cmd_play_animation(params: Dictionary) -> Dictionary:
 		return {"status": "error", "error": "Animation '%s' not found" % anim_name}
 	anim_player.play(anim_name)
 	return {"status": "ok", "data": {"path": node_path, "animation": anim_name, "playing": true}}
+
+func _cmd_capture_sequence(params: Dictionary) -> Dictionary:
+	var count: int = clampi(int(params.get("count", 5)), 1, 30)
+	var frames: Array = []
+	for i in range(count):
+		var img := get_viewport().get_texture().get_image()
+		if img != null:
+			var base64 := Marshalls.raw_to_base64(img.save_png_to_buffer())
+			frames.append({"frame": i, "base64_png": base64, "width": img.get_width(), "height": img.get_height()})
+	return {"status": "ok", "data": {"frame_count": frames.size(), "frames": frames}}
+
+func _cmd_export_project_api(_params: Dictionary) -> Dictionary:
+	var root := get_tree().current_scene if get_tree().current_scene else get_tree().root
+	var script_map: Dictionary = {}
+	_scan_scripts_recursive(root, script_map)
+	return {"status": "ok", "data": {"scripts": script_map, "count": script_map.size()}}
+
+func _scan_scripts_recursive(node: Node, map: Dictionary) -> void:
+	var script = node.get_script()
+	if script is Script and script.resource_path.begins_with("res://"):
+		var path_str := script.resource_path
+		if not map.has(path_str):
+			var props: Array = []
+			for p in script.get_script_property_list():
+				props.append({"name": str(p.name), "type": int(p.type)})
+			var methods: Array = []
+			for m in script.get_script_method_list():
+				methods.append({"name": str(m.name)})
+			var sigs: Array = []
+			for s in script.get_script_signal_list():
+				sigs.append({"name": str(s.name)})
+			map[path_str] = {
+				"class_name": str(script.get_global_name()) if script.has_method("get_global_name") else "",
+				"path": path_str,
+				"properties": props,
+				"methods": methods,
+				"signals": sigs
+			}
+	for child in node.get_children():
+		_scan_scripts_recursive(child, map)
+
 
 
 
