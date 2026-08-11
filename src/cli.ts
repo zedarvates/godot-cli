@@ -1014,6 +1014,30 @@ program
   });
 
 program
+  .command("greformer-snap")
+  .description("Snap node to grid (0.25m, 0.5m, 1.0m, 2.0m)")
+  .argument("<node-path>", "Path to node")
+  .option("--step <number>", "Grid step (default 1.0)", "1.0")
+  .action(async (nodePath, opts) => {
+    await run("greformer_snap_grid", {
+      node_path: nodePath,
+      step: parseFloat(opts.step),
+    });
+  });
+
+program
+  .command("greformer-carve")
+  .description("Carve doorway or window hole into GReFormer node")
+  .argument("<node-path>", "Path to GReFormer node")
+  .option("--type <door|window>", "Hole type (door or window)", "door")
+  .action(async (nodePath, opts) => {
+    await run("greformer_carve_hole", {
+      node_path: nodePath,
+      hole_type: opts.type,
+    });
+  });
+
+program
   .command("init-mcp")
   .description("Generate or update .mcp.json snippet to register godot-cli-mcp server")
   .action(async () => {

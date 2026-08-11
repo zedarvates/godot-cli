@@ -62,6 +62,8 @@ const MUTATING_COMMANDS := {
 	"greformer_bake": true,
 	"greformer_export_obj": true,
 	"greformer_create_preset": true,
+	"greformer_snap_grid": true,
+	"greformer_carve_hole": true,
 }
 
 const UNSAFE_COMMANDS := {
@@ -412,6 +414,8 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"greformer_bake": return _cmd_greformer_bake(params)
 		"greformer_export_obj": return _cmd_greformer_export_obj(params)
 		"greformer_create_preset": return _cmd_greformer_create_preset(params)
+		"greformer_snap_grid": return _cmd_greformer_snap_grid(params)
+		"greformer_carve_hole": return _cmd_greformer_carve_hole(params)
 		_: return {"status": "error", "error": "Unknown command: " + command}
 
 
@@ -2110,6 +2114,37 @@ func _cmd_greformer_create_preset(params: Dictionary) -> Variant:
 		gmesh.call("load_from_array_mesh", mesh_res)
 		
 	return {"status": "ok", "name": str(node.name), "path": str(node.get_path()), "preset": preset_name}
+
+func _cmd_greformer_snap_grid(params: Dictionary) -> Variant:
+	var node_path := str(params.get("node_path", ""))
+	var step := float(params.get("step", 1.0))
+	var node := get_node_or_null(node_path) as Node3D
+	if not node:
+		return {"status": "error", "error": "Node3D not found: " + node_path}
+		
+	var snap_tool = load("res://addons/greformer/tools/snap_alignment_tool.gd")
+	if snap_tool:
+		snap_tool.call("snap_node_to_grid", node, step)
+		return {"status": "ok", "path": node_path, "position": _serialize(node.global_position), "step": step}
+		
+	return {"status": "error", "error": "Failed to load snap alignment tool"}
+
+func _cmd_greformer_carve_hole(params: Dictionary) -> Variant:
+	var node_path := str(params.get("node_path", ""))
+	var hole_type := str(params.get("hole_type", "door")) # "door" or "window"
+	var node := get_node_or_null(node_path) as GReFormerNode3D
+	if not node:
+		return {"status": "error", "error": "GReFormer node not found: " + node_path}
+		
+	var boolean_tool = load("res://addons/greformer/tools/boolean_mesh_tool.gd")
+	if boolean_tool:
+		if hole_type.findn("win") != -1:
+			boolean_tool.call("carve_window_hole", node)
+		else:
+			boolean_tool.call("carve_doorway_hole", node)
+		return {"status": "ok", "path": node_path, "hole_type": hole_type}
+		
+	return {"status": "error", "error": "Failed to load boolean mesh tool"}
 
 func _parse_vector3(val: Variant) -> Vector3:
 	if val is Vector3:
