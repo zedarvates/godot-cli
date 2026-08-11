@@ -4,11 +4,12 @@
   "description": "CLI tool for controlling Godot game engine - like Playwright, but for games",
   "type": "module",
   "bin": {
-    "godot-cli": "./dist/cli.js"
+    "godot-cli": "./dist/src/cli.js"
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "npm run build && node --test dist/tests/*.test.js"
   },
   "dependencies": {
     "commander": "^13.1.0"
