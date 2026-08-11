@@ -2,6 +2,7 @@
 
 import { Command } from "commander";
 import { GodotClient, type GodotResponse } from "./client.js";
+import { runMcpServer } from "./mcp.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -12,9 +13,10 @@ program
   .description(
     "CLI tool for controlling the Godot game engine — like Playwright, but for games"
   )
-  .version("0.1.0")
+  .version("0.2.0")
   .option("--host <host>", "Godot server host", "localhost")
-  .option("--port <port>", "Godot server port", "9900");
+  .option("--port <port>", "Godot server port", "9900")
+  .option("--mcp", "Run as Stdio MCP (Model Context Protocol) Server for AI Agents");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -624,11 +626,36 @@ program
     await run("visible_nodes", params);
   });
 
+program
+  .command("ping")
+  .description("Ping the running Godot game engine to check connection readiness")
+  .action(async () => {
+    await run("ping");
+  });
+
+program
+  .command("batch-execute")
+  .description("Execute multiple commands in a single TCP request")
+  .argument("<json-commands>", "JSON string array of commands, e.g. '[{\"command\": \"ping\"}]'")
+  .action(async (jsonStr: string) => {
+    try {
+      const commands = JSON.parse(jsonStr);
+      await run("batch_execute", { commands });
+    } catch {
+      process.stderr.write("Error: Invalid JSON array format for batch-execute\n");
+      process.exit(1);
+    }
+  });
+
 // ---------------------------------------------------------------------------
 
-// Show overview when no command is given
-program.action(() => {
-  printOverview();
+program.action(async () => {
+  const opts = program.opts();
+  if (opts.mcp) {
+    await runMcpServer({ host: opts.host, port: opts.port });
+  } else {
+    printOverview();
+  }
 });
 
 program.parse();

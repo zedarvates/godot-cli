@@ -134,6 +134,8 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"validate_scene": return _cmd_validate_scene(params)
 		"viewport_info": return _cmd_viewport_info(params)
 		"visible_nodes": return _cmd_visible_nodes(params)
+		"ping": return {"status": "ok", "data": {"pong": true, "engine": "Godot " + Engine.get_version_info()["string"]}}
+		"batch_execute": return _cmd_batch_execute(params, client, id)
 		_: return {"status": "error", "error": "Unknown command: " + command}
 
 # ============================================================
@@ -1385,3 +1387,18 @@ func _collect_visible_nodes(node: Node, result: Array, type_filter: String, view
 	# Always recurse — children might be in viewport even if parent position is outside
 	for child in node.get_children():
 		_collect_visible_nodes(child, result, type_filter, viewport_rect)
+
+
+func _cmd_batch_execute(params: Dictionary, client: Dictionary, id: String) -> Dictionary:
+	var commands: Array = params.get("commands", [])
+	var results: Array = []
+	for cmd in commands:
+		if cmd is Dictionary:
+			var c_name: String = str(cmd.get("command", ""))
+			var c_params: Dictionary = cmd.get("params", {})
+			var res = _execute(c_name, c_params, client, id)
+			results.append(res)
+		else:
+			results.append({"status": "error", "error": "Invalid batch item format"})
+	return {"status": "ok", "data": {"results": results}}
+

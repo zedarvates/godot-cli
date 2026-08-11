@@ -1,21 +1,28 @@
-# godot-cli
+# godot-cli (Enhanced Agentic Edition)
 
-A CLI tool for controlling the Godot game engine — like [Playwright](https://playwright.dev/), but for games.
+A CLI & Stdio MCP tool for controlling the Godot game engine — like [Playwright](https://playwright.dev/), but for games.
 
-Designed for **coding agents** (like Claude Code) to programmatically build, inspect, test, and verify Godot games at runtime. Connects to a running Godot 4.6+ game via TCP and provides 29 commands for full control.
+Designed for **coding agents** (Antigravity, Claude Code, Cursor, Windsurf) to programmatically build, inspect, test, and verify Godot games at runtime. Connects to a running Godot game via TCP and provides 31+ commands and native MCP integration.
+
+## Features & Enhancements
+
+- 🤖 **Native Stdio MCP Server (`--mcp`)**: Connect AI agents directly via JSON-RPC 2.0 without shell subprocess overhead.
+- ⚡ **Atomic Batch Execution (`batch-execute`)**: Run multiple commands in a single low-latency TCP payload.
+- 📡 **Readiness Probe (`ping`)**: Instantly verify Godot engine availability.
+- 🧊 **3D Spatial Types**: Native serialization for `Vector3`, `Quaternion`, `Transform3D`, `Basis`, `AABB`.
 
 ## How it works
 
 Two components:
 
 1. **Godot addon** — A TCP server that runs inside your game as an autoload, accepting JSON commands
-2. **CLI tool** — A Node.js client that sends commands and prints JSON results
+2. **CLI & MCP Tool** — A Node.js client / Stdio MCP server that sends commands and prints JSON results
 
 ```
-┌─────────────┐     TCP/JSON     ┌──────────────────┐
-│  godot-cli   │ ──────────────> │  Godot Game       │
-│  (Node.js)   │ <────────────── │  (cli_server.gd)  │
-└─────────────┘   localhost:9900 └──────────────────┘
+┌─────────────────────┐     TCP/JSON     ┌──────────────────┐
+│  godot-cli (--mcp)  │ ──────────────> │  Godot Game       │
+│  (Node.js / Stdio)  │ <────────────── │  (cli_server.gd)  │
+└─────────────────────┘   localhost:9900 └──────────────────┘
 ```
 
 ## Setup
