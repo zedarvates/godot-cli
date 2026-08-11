@@ -84,9 +84,50 @@ Add `--godot-cli-token=<secret>` command line argument to Godot execution. If co
 
 ---
 
+## 🪵 Proposal 6: Runtime Log Stream Buffer (`get_logs`)
+
+### Problem
+When GDScript errors or warnings occur during test execution, coding agents currently cannot inspect the runtime error log without looking at external terminal output or log files.
+
+### Proposed Solution
+Buffer GDScript runtime logs, errors, and warnings inside `cli_server.gd` and provide `get-logs [--level error|warning|info] [--clear]`.
+
+---
+
+## ⚡ Proposal 7: Signal Inspection & Programmatic Emission (`list_signals`, `emit_signal`)
+
+### Problem
+Testing event-driven game logic requires inspecting signal connections and firing custom signals programmatically.
+
+### Proposed Solution
+Add `list-signals <node_path>` to view all signals, argument types, and connected callables, and `emit-signal <node_path> <signal_name> [args...]` to trigger signals on demand.
+
+---
+
+## 🎯 Proposal 8: World Space State Physics Queries (`query_ray`, `query_point`)
+
+### Problem
+Testing collision geometry or line-of-sight requires programmatically querying physics space states without polluting the scene tree with dummy `RayCast3D` or `Area2D` nodes.
+
+### Proposed Solution
+Add `query-ray` and `query-point` to query `PhysicsRayQueryParameters3D` / `PhysicsRayQueryParameters2D` directly against the world space state.
+
+---
+
+## 🎮 Proposal 9: InputMap Action Simulation & Viewport Highlighting (`action_press`, `highlight_node`)
+
+### Problem
+1. Raw key presses (`press-key Space`) don't test Godot InputMap actions (`ui_accept`, `move_forward`).
+2. Screenshots captured by agents lack visual indicators of target nodes.
+
+### Proposed Solution
+Add `action-press <action_name> [--strength 1.0]` / `action-release` for InputMap testing, and `highlight-node <node_path> [--duration 2.0]` to visually outline target nodes in screenshots.
+
+---
+
 ## 🛠 Status & Pull Request Availability
 
-All proposals above have been implemented, built, and tested in our branch:
+All 9 proposals above have been implemented, built, and tested (with a 3/3 automated test suite pass) in our branch:
 👉 **[https://github.com/zedarvates/godot-cli/tree/feature/mcp-3d-resilience](https://github.com/zedarvates/godot-cli/tree/feature/mcp-3d-resilience)**
 
 We are ready to submit these improvements as modular Pull Requests to `mattias800/godot-cli`.
