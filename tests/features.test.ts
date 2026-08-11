@@ -35,10 +35,10 @@ test("GodotClient handles metrics, get_logs, and action_press commands", async (
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(9903, "localhost", resolve));
+  await new Promise<void>((resolve) => server.listen(9913, "127.0.0.1", resolve));
 
   try {
-    const client = new GodotClient({ port: 9903 });
+    const client = new GodotClient({ host: "127.0.0.1", port: 9913 });
 
     const metricsRes = await client.send("metrics");
     assert.equal(metricsRes.status, "ok");

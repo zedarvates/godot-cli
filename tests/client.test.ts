@@ -12,10 +12,10 @@ test("GodotClient connects and sends JSON newline-delimited command", async () =
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(9901, "localhost", resolve));
+  await new Promise<void>((resolve) => server.listen(9911, "127.0.0.1", resolve));
 
   try {
-    const client = new GodotClient({ port: 9901 });
+    const client = new GodotClient({ host: "127.0.0.1", port: 9911 });
     const res = await client.send("ping");
     assert.equal(res.status, "ok");
     assert.deepEqual(res.data, { pong: true });

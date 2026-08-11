@@ -900,6 +900,72 @@ program
     }
   });
 
+program
+  .command("install-addon")
+  .description("Copy GodotCLI addon into target Godot project and enable it in project.godot")
+  .argument("[target-path]", "Path to Godot project directory", "./")
+  .action(async (targetPath: string) => {
+    try {
+      const projDir = path.resolve(targetPath);
+      const projFile = path.join(projDir, "project.godot");
+      if (!fs.existsSync(projFile)) {
+        process.stderr.write(`Error: No project.godot found at ${projDir}\n`);
+        process.exit(1);
+      }
+
+      const __dirname = path.dirname(new URL(import.meta.url).pathname);
+      let addonSource = path.resolve(__dirname, "../../godot-addon/addons/godot_cli");
+      if (!fs.existsSync(addonSource)) {
+        addonSource = path.resolve(__dirname, "../godot-addon/addons/godot_cli");
+      }
+
+      const destAddonDir = path.join(projDir, "addons", "godot_cli");
+      fs.mkdirSync(destAddonDir, { recursive: true });
+
+      if (fs.existsSync(addonSource)) {
+        const files = fs.readdirSync(addonSource);
+        for (const file of files) {
+          const srcFile = path.join(addonSource, file);
+          const destFile = path.join(destAddonDir, file);
+          if (fs.statSync(srcFile).isFile()) {
+            fs.copyFileSync(srcFile, destFile);
+          }
+        }
+      }
+
+      let projContent = fs.readFileSync(projFile, "utf-8");
+      const pluginEntry = "res://addons/godot_cli/plugin.cfg";
+      if (!projContent.includes(pluginEntry)) {
+        if (projContent.includes("[editor_plugins]")) {
+          projContent = projContent.replace(
+            "[editor_plugins]",
+            `[editor_plugins]\n\nenabled=PackedStringArray("${pluginEntry}")`
+          );
+        } else {
+          projContent += `\n[editor_plugins]\n\nenabled=PackedStringArray("${pluginEntry}")\n`;
+        }
+        fs.writeFileSync(projFile, projContent);
+      }
+
+      process.stdout.write(
+        JSON.stringify(
+          {
+            status: "ok",
+            message: "GodotCLI addon installed and enabled in project!",
+            project: projFile,
+            addon: destAddonDir,
+          },
+          null,
+          2
+        ) + "\n"
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`Install Addon Error: ${msg}\n`);
+      process.exit(1);
+    }
+  });
+
 // ---------------------------------------------------------------------------
 
 program.action(async () => {

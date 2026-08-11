@@ -12,10 +12,10 @@ test("godot-cli --mcp responds to JSON-RPC initialize and tools/list", async () 
     });
   });
 
-  await new Promise<void>((resolve) => mockServer.listen(9902, "localhost", resolve));
+  await new Promise<void>((resolve) => mockServer.listen(9912, "127.0.0.1", resolve));
 
   const cliPath = path.resolve("dist/src/cli.js");
-  const child = spawn("node", [cliPath, "--mcp", "--port", "9902"], {
+  const child = spawn("node", [cliPath, "--mcp", "--host", "127.0.0.1", "--port", "9912"], {
     stdio: ["pipe", "pipe", "inherit"],
   });
 
