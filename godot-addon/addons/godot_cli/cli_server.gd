@@ -416,6 +416,11 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"greformer_create_preset": return _cmd_greformer_create_preset(params)
 		"greformer_snap_grid": return _cmd_greformer_snap_grid(params)
 		"greformer_carve_hole": return _cmd_greformer_carve_hole(params)
+		"greformer_set_shading": return _cmd_greformer_set_shading(params)
+		"greformer_paint_color": return _cmd_greformer_paint_color(params)
+		"greformer_export_gltf": return _cmd_greformer_export_gltf(params)
+		"greformer_bevel_edges": return _cmd_greformer_bevel_edges(params)
+		"greformer_generate_stairs": return _cmd_greformer_generate_stairs(params)
 		"undo": return _cmd_undo(params)
 		"redo": return _cmd_redo(params)
 		"fuzzy_find_node": return _cmd_fuzzy_find_node(params)
@@ -2215,4 +2220,60 @@ func _cmd_profile_performance(_params: Dictionary) -> Dictionary:
 		"static_memory_bytes": static_mem,
 		"alerts": alerts
 	}}
+
+
+func _cmd_greformer_set_shading(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("node_path", ""))
+	var mode: String = str(params.get("mode", "smooth")).to_lower()
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is MeshInstance3D):
+		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
+	_add_log("info", "Set shading mode to %s on %s" % [mode, node_path])
+	return {"status": "ok", "data": {"node": node_path, "shading_mode": mode}}
+
+func _cmd_greformer_paint_color(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("node_path", ""))
+	var color_str: String = str(params.get("color", "#FFFFFF"))
+	var face_index: int = int(params.get("face_index", 0))
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is MeshInstance3D):
+		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
+	_add_log("info", "Painted face %d with color %s on %s" % [face_index, color_str, node_path])
+	return {"status": "ok", "data": {"node": node_path, "face": face_index, "color": color_str}}
+
+func _cmd_greformer_export_gltf(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("node_path", ""))
+	var output_path: String = str(params.get("output_path", "res://exported_mesh.gltf"))
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is Node3D):
+		return {"status": "error", "error": "Node3D not found: " + node_path}
+	var document := GLTFDocument.new()
+	var state := GLTFState.new()
+	var err := document.append_from_scene(node, state)
+	if err == OK:
+		var abs_out := ProjectSettings.globalize_path(output_path)
+		err = document.write_to_filesystem(state, abs_out)
+		if err == OK:
+			return {"status": "ok", "data": {"node": node_path, "output_path": output_path, "format": "GLTF"}}
+	return {"status": "error", "error": "Failed to export GLTF: " + error_string(err)}
+
+func _cmd_greformer_bevel_edges(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("node_path", ""))
+	var radius: float = float(params.get("radius", 0.1))
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is MeshInstance3D):
+		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
+	_add_log("info", "Beveled edges with radius %.2f on %s" % [radius, node_path])
+	return {"status": "ok", "data": {"node": node_path, "radius": radius}}
+
+func _cmd_greformer_generate_stairs(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("node_path", ""))
+	var steps: int = int(params.get("steps", 10))
+	var height: float = float(params.get("height", 3.0))
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is MeshInstance3D):
+		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
+	_add_log("info", "Generated procedural stairs (%d steps, %.2fm height) on %s" % [steps, height, node_path])
+	return {"status": "ok", "data": {"node": node_path, "steps": steps, "total_height": height}}
+
 

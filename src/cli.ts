@@ -1038,6 +1038,38 @@ program
   });
 
 program
+  .command("greformer-bevel")
+  .description("Bevel / chamfer edges of a GReFormer node")
+  .argument("<node-path>", "Path to GReFormer node")
+  .option("--offset <number>", "Bevel offset distance", "0.1")
+  .action(async (nodePath, opts) => {
+    await run("greformer_bevel_edges", {
+      node_path: nodePath,
+      offset: parseFloat(opts.offset),
+    });
+  });
+
+program
+  .command("greformer-stairs")
+  .description("Generate parametric staircase with optional railings")
+  .option("--parent <path>", "Parent node path", "/root")
+  .option("--steps <number>", "Number of steps", "8")
+  .option("--width <number>", "Step width", "2.0")
+  .option("--height <number>", "Step height", "0.25")
+  .option("--depth <number>", "Step depth", "0.4")
+  .option("--railings <boolean>", "Add side railings", "true")
+  .action(async (opts) => {
+    await run("greformer_generate_stairs", {
+      parent: opts.parent,
+      step_count: parseInt(opts.steps),
+      step_width: parseFloat(opts.width),
+      step_height: parseFloat(opts.height),
+      step_depth: parseFloat(opts.depth),
+      has_railings: opts.railings === "true",
+    });
+  });
+
+program
   .command("undo")
   .description("Undo last editor or scene modification")
   .action(async () => {

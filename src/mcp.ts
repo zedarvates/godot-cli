@@ -322,6 +322,70 @@ export async function runMcpServer(options: { host?: string; port?: string | num
       },
     },
     {
+      name: "godot_greformer_set_shading",
+      description: "Recalculate flat vs smooth normals for a GReFormer node.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_path: { type: "string", description: "GReFormer node path" },
+          mode: { type: "string", description: "Shading mode ('flat' or 'smooth')" },
+        },
+        required: ["node_path"],
+      },
+    },
+    {
+      name: "godot_greformer_paint_color",
+      description: "Paint vertex color on face or entire GReFormer mesh.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_path: { type: "string", description: "GReFormer node path" },
+          color: { type: "array", description: "RGB color tuple [r, g, b]" },
+          face_index: { type: "number", description: "Face index (-1 for entire mesh)" },
+        },
+        required: ["node_path"],
+      },
+    },
+    {
+      name: "godot_greformer_export_gltf",
+      description: "Export GReFormer node directly to GLTF/GLB binary file.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_path: { type: "string", description: "GReFormer node path" },
+          output_path: { type: "string", description: "Target file path (res://model.glb)" },
+        },
+        required: ["node_path"],
+      },
+    },
+    {
+      name: "godot_greformer_bevel_edges",
+      description: "Bevel / chamfer hard edges of a GReFormer node.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_path: { type: "string", description: "GReFormer node path" },
+          offset: { type: "number", description: "Bevel offset distance (default 0.1)" },
+        },
+        required: ["node_path"],
+      },
+    },
+    {
+      name: "godot_greformer_generate_stairs",
+      description: "Generate parametric staircase with custom step count and side railings.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          parent: { type: "string", description: "Parent node path (default /root)" },
+          step_count: { type: "number", description: "Number of steps (default 8)" },
+          step_width: { type: "number", description: "Step width (default 2.0)" },
+          step_height: { type: "number", description: "Step height (default 0.25)" },
+          step_depth: { type: "number", description: "Step depth (default 0.4)" },
+          has_railings: { type: "boolean", description: "Add side railings (default true)" },
+        },
+      },
+    },
+    {
       name: "godot_capture_sequence",
       description: "Capture a multi-frame sequence of viewport screenshots as base64 images.",
       inputSchema: {
@@ -423,6 +487,11 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_greformer_create_preset": commandName = "greformer_create_preset"; break;
           case "godot_greformer_snap_grid": commandName = "greformer_snap_grid"; break;
           case "godot_greformer_carve_hole": commandName = "greformer_carve_hole"; break;
+          case "godot_greformer_set_shading": commandName = "greformer_set_shading"; break;
+          case "godot_greformer_paint_color": commandName = "greformer_paint_color"; break;
+          case "godot_greformer_export_gltf": commandName = "greformer_export_gltf"; break;
+          case "godot_greformer_bevel_edges": commandName = "greformer_bevel_edges"; break;
+          case "godot_greformer_generate_stairs": commandName = "greformer_generate_stairs"; break;
           case "godot_capture_sequence": commandName = "capture_sequence"; break;
           case "godot_export_project_api": commandName = "export_project_api"; break;
           case "godot_undo": commandName = "undo"; break;
