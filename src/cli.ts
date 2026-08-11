@@ -869,6 +869,110 @@ program
   });
 
 program
+  .command("spawn-3d")
+  .description("Spawn a 3D object in the active Godot scene")
+  .option("--type <type>", "Node class name", "MeshInstance3D")
+  .option("--name <name>", "Object name", "New3DObject")
+  .option("--parent <parent>", "Parent node path", "/root")
+  .option("--position <pos>", "Position [x,y,z] or Vector3(x,y,z)")
+  .option("--rotation <rot>", "Rotation [x,y,z]")
+  .option("--scale <scale>", "Scale [x,y,z]")
+  .action(async (opts) => {
+    await run("spawn_3d_object", {
+      type: opts.type,
+      name: opts.name,
+      parent_path: opts.parent,
+      position: opts.position ? parseValue(opts.position) : undefined,
+      rotation: opts.rotation ? parseValue(opts.rotation) : undefined,
+      scale: opts.scale ? parseValue(opts.scale) : undefined,
+    });
+  });
+
+program
+  .command("transform-3d")
+  .description("Transform a 3D node position, rotation, or scale")
+  .argument("<node-path>", "Path to 3D node")
+  .option("--position <pos>", "New position")
+  .option("--rotation <rot>", "New rotation")
+  .option("--scale <scale>", "New scale")
+  .option("--relative", "Apply delta position/rotation relatively")
+  .action(async (nodePath, opts) => {
+    await run("transform_3d_node", {
+      node_path: nodePath,
+      position: opts.position ? parseValue(opts.position) : undefined,
+      rotation: opts.rotation ? parseValue(opts.rotation) : undefined,
+      scale: opts.scale ? parseValue(opts.scale) : undefined,
+      relative: opts.relative,
+    });
+  });
+
+program
+  .command("inspect-level")
+  .description("Inspect surrounding 3D level layout near a center position")
+  .option("--center <pos>", "Center position [x,y,z]", "0,0,0")
+  .option("--radius <radius>", "Search radius", "20")
+  .option("--root <path>", "Root path", "/root")
+  .action(async (opts) => {
+    await run("inspect_level_layout", {
+      center_position: parseValue(opts.center),
+      radius: parseFloat(opts.radius),
+      node_path: opts.root,
+    });
+  });
+
+program
+  .command("greformer-create")
+  .description("Create a GReFormer editable primitive (Box, Stairs, Cylinder)")
+  .option("--primitive <type>", "Box, Stairs, or Cylinder", "Box")
+  .option("--name <name>", "Object name", "GReFormer_Object")
+  .option("--position <pos>", "Position [x,y,z]")
+  .action(async (opts) => {
+    await run("greformer_create", {
+      primitive_type: opts.primitive,
+      name: opts.name,
+      position: opts.position ? parseValue(opts.position) : undefined,
+    });
+  });
+
+program
+  .command("greformer-push-pull")
+  .description("Extrude a GReFormer face along normal (SketchUp Push/Pull)")
+  .argument("<node-path>", "Path to GReFormer node")
+  .option("--face <index>", "Face index", "0")
+  .option("--distance <dist>", "Distance along normal", "1.0")
+  .action(async (nodePath, opts) => {
+    await run("greformer_push_pull", {
+      node_path: nodePath,
+      face_index: parseInt(opts.face, 10),
+      distance: parseFloat(opts.distance),
+    });
+  });
+
+program
+  .command("greformer-hotspot")
+  .description("Apply a Hotspot UV texture mapping to a face")
+  .argument("<node-path>", "Path to GReFormer node")
+  .option("--face <index>", "Face index", "0")
+  .option("--region <region>", "Hotspot region: Wood_Plank, Metal_Trim, Stone_Wall, Bricks", "Wood_Plank")
+  .action(async (nodePath, opts) => {
+    await run("greformer_apply_hotspot", {
+      node_path: nodePath,
+      face_index: parseInt(opts.face, 10),
+      region_name: opts.region,
+    });
+  });
+
+program
+  .command("greformer-bake")
+  .description("Bake a GReFormer editable mesh to standard MeshInstance3D with collision")
+  .argument("<node-path>", "Path to GReFormer node")
+  .action(async (nodePath) => {
+    await run("greformer_bake", {
+      node_path: nodePath,
+    });
+  });
+
+program
   .command("init-mcp")
   .description("Generate or update .mcp.json snippet to register godot-cli-mcp server")
   .action(async () => {

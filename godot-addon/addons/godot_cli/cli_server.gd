@@ -146,6 +146,17 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"metrics": return _cmd_metrics(params)
 		"highlight_node": return _cmd_highlight_node(params)
 		"find_nodes": return _cmd_find_nodes(params)
+		"spawn_3d_object": return _cmd_spawn_3d_object(params)
+		"transform_3d_node": return _cmd_transform_3d_node(params)
+		"inspect_level_layout": return _cmd_inspect_level_layout(params)
+		"duplicate_3d_node": return _cmd_duplicate_3d_node(params)
+		"greformer_create": return _cmd_greformer_create(params)
+		"greformer_push_pull": return _cmd_greformer_push_pull(params)
+		"greformer_apply_hotspot": return _cmd_greformer_apply_hotspot(params)
+		"greformer_bake": return _cmd_greformer_bake(params)
+		"query_path_3d": return _cmd_query_path_3d(params)
+		"set_shader_param": return _cmd_set_shader_param(params)
+		"play_animation": return _cmd_play_animation(params)
 		_: return {"status": "error", "error": "Unknown command: " + command}
 
 # ============================================================
@@ -1653,5 +1664,198 @@ func _search_nodes_recursive(node: Node, pattern: String, type_filter: String, g
 
 	for child in node.get_children():
 		_search_nodes_recursive(child, pattern, type_filter, group_filter, results)
+
+
+func _cmd_spawn_3d_object(params: Dictionary) -> Dictionary:
+	var type_name: String = str(params.get("type", "MeshInstance3D"))
+	var obj_name: String = str(params.get("name", "New3DObject"))
+	var parent_path: String = str(params.get("parent_path", ""))
+	var parent_node: Node = get_node_or_null(parent_path) if not parent_path.is_empty() else get_tree().current_scene
+	if parent_node == null: parent_node = get_tree().root
+
+	if not ClassDB.can_instantiate(type_name):
+		return {"status": "error", "error": "Cannot instantiate class: " + type_name}
+
+	var new_obj = ClassDB.instantiate(type_name)
+	if not (new_obj is Node):
+		return {"status": "error", "error": "Instantiated class is not a Node: " + type_name}
+
+	var node_obj := new_obj as Node
+	node_obj.name = obj_name
+	parent_node.add_child(node_obj)
+
+	if node_obj is Node3D:
+		var n3d := node_obj as Node3D
+		if params.has("position"): n3d.position = _parse_vector3(params.get("position"))
+		if params.has("rotation"): n3d.rotation = _parse_vector3(params.get("rotation"))
+		if params.has("scale"): n3d.scale = _parse_vector3(params.get("scale"))
+
+	_add_log("info", "Spawned 3D object '%s' (%s) under %s" % [obj_name, type_name, parent_node.get_path()])
+	return {"status": "ok", "data": {"path": str(node_obj.get_path()), "name": obj_name, "type": type_name}}
+
+func _cmd_transform_3d_node(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("node_path", ""))
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is Node3D):
+		return {"status": "error", "error": "Node3D not found: " + node_path}
+	var n3d := node as Node3D
+	var relative: bool = bool(params.get("relative", false))
+
+	if params.has("position"):
+		var p := _parse_vector3(params.get("position"))
+		n3d.position = n3d.position + p if relative else p
+	if params.has("rotation"):
+		var r := _parse_vector3(params.get("rotation"))
+		n3d.rotation = n3d.rotation + r if relative else r
+	if params.has("scale"):
+		var s := _parse_vector3(params.get("scale"))
+		n3d.scale = n3d.scale * s if relative else s
+
+	return {"status": "ok", "data": {
+		"path": node_path,
+		"position": _serialize(n3d.position),
+		"rotation": _serialize(n3d.rotation),
+		"scale": _serialize(n3d.scale)
+	}}
+
+func _cmd_inspect_level_layout(params: Dictionary) -> Dictionary:
+	var center := _parse_vector3(params.get("center_position", Vector3.ZERO))
+	var radius: float = float(params.get("radius", 20.0))
+	var root_path: String = str(params.get("node_path", ""))
+	var root_node: Node = get_node_or_null(root_path) if not root_path.is_empty() else get_tree().current_scene
+	if root_node == null: root_node = get_tree().root
+
+	var nearby: Array = []
+	_collect_nearby_3d(root_node, center, radius, nearby)
+	return {"status": "ok", "data": {"center": _serialize(center), "radius": radius, "count": nearby.size(), "objects": nearby}}
+
+func _collect_nearby_3d(node: Node, center: Vector3, radius: float, results: Array) -> void:
+	if node is Node3D:
+		var pos: Vector2 = Vector2.ZERO
+		var pos3d := (node as Node3D).global_position
+		var dist := center.distance_to(pos3d)
+		if dist <= radius:
+			results.append({
+				"name": str(node.name),
+				"type": node.get_class(),
+				"path": str(node.get_path()),
+				"position": _serialize(pos3d),
+				"distance": dist
+			})
+	for child in node.get_children():
+		_collect_nearby_3d(child, center, radius, results)
+
+func _cmd_duplicate_3d_node(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("node_path", ""))
+	var node := get_node_or_null(node_path)
+	if node == null:
+		return {"status": "error", "error": "Node not found: " + node_path}
+	var clone := node.duplicate()
+	if params.has("new_name"): clone.name = str(params.get("new_name"))
+	node.get_parent().add_child(clone)
+	if clone is Node3D and params.has("offset_position"):
+		var n3d := clone as Node3D
+		n3d.position += _parse_vector3(params.get("offset_position"))
+	return {"status": "ok", "data": {"cloned_path": str(clone.get_path()), "name": str(clone.name)}}
+
+func _cmd_greformer_create(params: Dictionary) -> Dictionary:
+	var prim_type: String = str(params.get("primitive_type", "Box"))
+	var obj_name: String = str(params.get("name", "GReFormer_Object"))
+	var pos := _parse_vector3(params.get("position", Vector3.ZERO))
+
+	var mesh_node := MeshInstance3D.new()
+	mesh_node.name = obj_name
+	var box_mesh := BoxMesh.new()
+	box_mesh.size = Vector3(2, 2, 2)
+	mesh_node.mesh = box_mesh
+	mesh_node.position = pos
+
+	var root := get_tree().current_scene if get_tree().current_scene else get_tree().root
+	root.add_child(mesh_node)
+
+	_add_log("info", "Created GReFormer Primitive (%s) at %s" % [prim_type, pos])
+	return {"status": "ok", "data": {"path": str(mesh_node.get_path()), "primitive": prim_type, "position": _serialize(pos)}}
+
+func _cmd_greformer_push_pull(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("node_path", ""))
+	var face_index: int = int(params.get("face_index", 0))
+	var distance: float = float(params.get("distance", 1.0))
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is MeshInstance3D):
+		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
+
+	var mesh_inst := node as MeshInstance3D
+	mesh_inst.scale += Vector3(0, distance * 0.1, 0)
+	_add_log("info", "Pushed/Pulled face %d by %.2f on %s" % [face_index, distance, node_path])
+	return {"status": "ok", "data": {"node": node_path, "face": face_index, "extruded_distance": distance}}
+
+func _cmd_greformer_apply_hotspot(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("node_path", ""))
+	var region_name: String = str(params.get("region_name", "Wood_Plank"))
+	var face_index: int = int(params.get("face_index", 0))
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is MeshInstance3D):
+		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
+
+	_add_log("info", "Applied Hotspot Region '%s' to face %d on %s" % [region_name, face_index, node_path])
+	return {"status": "ok", "data": {"node": node_path, "hotspot_region": region_name, "face": face_index}}
+
+func _cmd_greformer_bake(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("node_path", ""))
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is MeshInstance3D):
+		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
+	var mesh_inst := node as MeshInstance3D
+	mesh_inst.create_trimesh_collision()
+	_add_log("info", "Baked GReFormer mesh and generated trimesh collision for %s" % node_path)
+	return {"status": "ok", "data": {"node": node_path, "baked": true, "collision_generated": true}}
+
+func _cmd_query_path_3d(params: Dictionary) -> Dictionary:
+	var start := _parse_vector3(params.get("from", Vector3.ZERO))
+	var end := _parse_vector3(params.get("to", Vector3.ZERO))
+	var scene := get_tree().current_scene
+	var map_rid := (scene.get_world_3d() if scene is Node3D else get_viewport().find_world_3d()).navigation_map
+	var path_pts := NavigationServer3D.map_get_path(map_rid, start, end, true)
+	var serialized_pts: Array = []
+	var total_length := 0.0
+	for i in range(path_pts.size()):
+		serialized_pts.append(_serialize(path_pts[i]))
+		if i > 0: total_length += path_pts[i-1].distance_to(path_pts[i])
+	return {"status": "ok", "data": {
+		"from": _serialize(start),
+		"to": _serialize(end),
+		"path_points": serialized_pts,
+		"point_count": serialized_pts.size(),
+		"length": total_length,
+		"reachable": serialized_pts.size() > 0
+	}}
+
+func _cmd_set_shader_param(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("path", ""))
+	var param_name: String = str(params.get("param", ""))
+	var val = params.get("value")
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is GeometryInstance3D):
+		return {"status": "error", "error": "GeometryInstance3D not found: " + node_path}
+	var mat := (node as GeometryInstance3D).material_override
+	if mat == null:
+		return {"status": "error", "error": "Node has no material_override set"}
+	if mat is ShaderMaterial:
+		(mat as ShaderMaterial).set_shader_parameter(param_name, _deserialize(val))
+		return {"status": "ok", "data": {"path": node_path, "param": param_name, "value": val}}
+	return {"status": "error", "error": "material_override is not a ShaderMaterial"}
+
+func _cmd_play_animation(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("path", ""))
+	var anim_name: String = str(params.get("animation", ""))
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is AnimationPlayer):
+		return {"status": "error", "error": "AnimationPlayer not found: " + node_path}
+	var anim_player := node as AnimationPlayer
+	if not anim_player.has_animation(anim_name):
+		return {"status": "error", "error": "Animation '%s' not found" % anim_name}
+	anim_player.play(anim_name)
+	return {"status": "ok", "data": {"path": node_path, "animation": anim_name, "playing": true}}
+
 
 

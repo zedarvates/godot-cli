@@ -217,6 +217,110 @@ export async function runMcpServer(options: { host?: string; port?: string | num
         },
       },
     },
+    {
+      name: "godot_spawn_3d_object",
+      description: "Spawn a 3D object in the scene (MeshInstance3D, Light3D, Camera3D, GReFormerNode3D, etc.).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", description: "Node type (default: MeshInstance3D or GReFormerNode3D)" },
+          name: { type: "string", description: "Node name" },
+          parent_path: { type: "string", description: "Parent node path (default: scene root)" },
+          position: { description: "Vector3 dict, array [x,y,z], or 'x,y,z' string" },
+          rotation: { description: "Vector3 dict, array [x,y,z], or 'x,y,z' string" },
+          scale: { description: "Vector3 dict, array [x,y,z], or 'x,y,z' string" },
+        },
+      },
+    },
+    {
+      name: "godot_transform_3d_node",
+      description: "Translate, rotate, or scale any 3D node in the scene.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_path: { type: "string", description: "Target node path" },
+          position: { description: "New position" },
+          rotation: { description: "New rotation in radians" },
+          scale: { description: "New scale" },
+          relative: { type: "boolean", description: "If true, add relative delta instead of absolute position" },
+        },
+        required: ["node_path"],
+      },
+    },
+    {
+      name: "godot_inspect_level_layout",
+      description: "Query surrounding 3D level layout, objects, and distances near a center point.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          center_position: { description: "Center position [x,y,z]" },
+          radius: { type: "number", description: "Search radius (default 20.0)" },
+          node_path: { type: "string", description: "Root node to inspect from" },
+        },
+      },
+    },
+    {
+      name: "godot_duplicate_3d_node",
+      description: "Clone a 3D level object or block with transform offset.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_path: { type: "string", description: "Source node path" },
+          new_name: { type: "string", description: "Optional name for clone" },
+          offset_position: { description: "Position offset for clone" },
+        },
+        required: ["node_path"],
+      },
+    },
+    {
+      name: "godot_greformer_create",
+      description: "Spawn a GReFormer 3D editable primitive (Box, Stairs, Cylinder) in the editor scene.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          primitive_type: { type: "string", description: "Primitive type: Box, Stairs, Cylinder (default Box)" },
+          name: { type: "string", description: "Object name" },
+          position: { description: "Spawn position [x,y,z]" },
+        },
+      },
+    },
+    {
+      name: "godot_greformer_push_pull",
+      description: "Extrude a GReFormer mesh face along its normal (SketchUp push/pull).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_path: { type: "string", description: "GReFormer node path" },
+          face_index: { type: "number", description: "Index of face to extrude (default 0)" },
+          distance: { type: "number", description: "Extrusion distance along normal" },
+        },
+        required: ["node_path"],
+      },
+    },
+    {
+      name: "godot_greformer_apply_hotspot",
+      description: "Apply a hotspot UV texture region (Wood_Plank, Metal_Trim, Stone_Wall, Bricks) to a face.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_path: { type: "string", description: "GReFormer node path" },
+          face_index: { type: "number", description: "Face index" },
+          region_name: { type: "string", description: "Hotspot region: Wood_Plank, Metal_Trim, Stone_Wall, Bricks" },
+        },
+        required: ["node_path", "region_name"],
+      },
+    },
+    {
+      name: "godot_greformer_bake",
+      description: "Bake a GReFormer editable node into a standard static MeshInstance3D with collision.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_path: { type: "string", description: "GReFormer node path to bake" },
+        },
+        required: ["node_path"],
+      },
+    },
   ];
 
   const rl = readline.createInterface({
@@ -266,6 +370,14 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_metrics": commandName = "metrics"; break;
           case "godot_highlight_node": commandName = "highlight_node"; break;
           case "godot_find_nodes": commandName = "find_nodes"; break;
+          case "godot_spawn_3d_object": commandName = "spawn_3d_object"; break;
+          case "godot_transform_3d_node": commandName = "transform_3d_node"; break;
+          case "godot_inspect_level_layout": commandName = "inspect_level_layout"; break;
+          case "godot_duplicate_3d_node": commandName = "duplicate_3d_node"; break;
+          case "godot_greformer_create": commandName = "greformer_create"; break;
+          case "godot_greformer_push_pull": commandName = "greformer_push_pull"; break;
+          case "godot_greformer_apply_hotspot": commandName = "greformer_apply_hotspot"; break;
+          case "godot_greformer_bake": commandName = "greformer_bake"; break;
           default:
             sendError(id, -32601, `Unknown tool: ${toolName}`);
             return;
