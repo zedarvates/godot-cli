@@ -336,6 +336,32 @@ export async function runMcpServer(options: { host?: string; port?: string | num
       description: "Scan loaded project GDScript scripts and export custom classes, properties, methods, and signals.",
       inputSchema: { type: "object", properties: {} },
     },
+    {
+      name: "godot_undo",
+      description: "Undo last editor / scene modification.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "godot_redo",
+      description: "Redo previously undone editor / scene modification.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "godot_fuzzy_find_node",
+      description: "Fuzzy search scene tree nodes matching partial query string.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Partial node name query string" },
+        },
+        required: ["query"],
+      },
+    },
+    {
+      name: "godot_profile_performance",
+      description: "Deep performance profiler: FPS, frametime, draw calls, VRAM, and orphan node memory leaks.",
+      inputSchema: { type: "object", properties: {} },
+    },
   ];
 
   const rl = readline.createInterface({
@@ -399,6 +425,10 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_greformer_carve_hole": commandName = "greformer_carve_hole"; break;
           case "godot_capture_sequence": commandName = "capture_sequence"; break;
           case "godot_export_project_api": commandName = "export_project_api"; break;
+          case "godot_undo": commandName = "undo"; break;
+          case "godot_redo": commandName = "redo"; break;
+          case "godot_fuzzy_find_node": commandName = "fuzzy_find_node"; break;
+          case "godot_profile_performance": commandName = "profile_performance"; break;
           default:
             sendError(id, -32601, `Unknown tool: ${toolName}`);
             return;

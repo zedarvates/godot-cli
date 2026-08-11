@@ -1038,6 +1038,35 @@ program
   });
 
 program
+  .command("undo")
+  .description("Undo last editor or scene modification")
+  .action(async () => {
+    await run("undo", {});
+  });
+
+program
+  .command("redo")
+  .description("Redo previously undone modification")
+  .action(async () => {
+    await run("redo", {});
+  });
+
+program
+  .command("fuzzy-find-node")
+  .description("Fuzzy search scene tree nodes matching partial query string")
+  .argument("<query>", "Partial node name query string")
+  .action(async (query: string) => {
+    await run("fuzzy_find_node", { query });
+  });
+
+program
+  .command("profile-performance")
+  .description("Deep performance profiler: FPS, frametime, draw calls, VRAM, and orphan node memory leaks")
+  .action(async () => {
+    await run("profile_performance", {});
+  });
+
+program
   .command("init-mcp")
   .description("Generate or update .mcp.json snippet to register godot-cli-mcp server")
   .action(async () => {

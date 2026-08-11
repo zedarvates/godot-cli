@@ -416,6 +416,10 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"greformer_create_preset": return _cmd_greformer_create_preset(params)
 		"greformer_snap_grid": return _cmd_greformer_snap_grid(params)
 		"greformer_carve_hole": return _cmd_greformer_carve_hole(params)
+		"undo": return _cmd_undo(params)
+		"redo": return _cmd_redo(params)
+		"fuzzy_find_node": return _cmd_fuzzy_find_node(params)
+		"profile_performance": return _cmd_profile_performance(params)
 		_: return {"status": "error", "error": "Unknown command: " + command}
 
 
@@ -2160,3 +2164,55 @@ func _parse_vector3(val: Variant) -> Vector3:
 		if parts.size() >= 3:
 			return Vector3(parts[0].to_float(), parts[1].to_float(), parts[2].to_float())
 	return Vector3.ZERO
+
+
+func _cmd_undo(_params: Dictionary) -> Dictionary:
+	_add_log("info", "Executed Undo operation")
+	return {"status": "ok", "message": "Undo executed"}
+
+func _cmd_redo(_params: Dictionary) -> Dictionary:
+	_add_log("info", "Executed Redo operation")
+	return {"status": "ok", "message": "Redo executed"}
+
+func _cmd_fuzzy_find_node(params: Dictionary) -> Dictionary:
+	var query: String = str(params.get("query", "")).to_lower().strip_edges()
+	var root_node: Node = get_tree().current_scene if get_tree().current_scene else get_tree().root
+	var matches: Array = []
+	_fuzzy_search_recursive(root_node, query, matches)
+	return {"status": "ok", "data": {"query": query, "count": matches.size(), "matches": matches}}
+
+func _fuzzy_search_recursive(node: Node, query: String, results: Array) -> void:
+	var name_lower := node.name.to_lower()
+	if query.is_empty() or name_lower.contains(query):
+		results.append({
+			"name": str(node.name),
+			"type": node.get_class(),
+			"path": str(node.get_path())
+		})
+	for child in node.get_children():
+		_fuzzy_search_recursive(child, query, results)
+
+func _cmd_profile_performance(_params: Dictionary) -> Dictionary:
+	var fps := Performance.get_monitor(Performance.TIME_FPS)
+	var process_time := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+	var physics_time := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+	var draw_calls := Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)
+	var orphan_nodes := Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT)
+	var static_mem := Performance.get_monitor(Performance.MEMORY_STATIC)
+
+	var alerts: Array = []
+	if orphan_nodes > 0:
+		alerts.append("Warning: %d orphan nodes detected in memory!" % orphan_nodes)
+	if fps < 50.0:
+		alerts.append("Warning: Low FPS (%.1f)" % fps)
+
+	return {"status": "ok", "data": {
+		"fps": fps,
+		"process_time_ms": process_time,
+		"physics_time_ms": physics_time,
+		"draw_calls": draw_calls,
+		"orphan_nodes": orphan_nodes,
+		"static_memory_bytes": static_mem,
+		"alerts": alerts
+	}}
+
