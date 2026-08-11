@@ -808,6 +808,98 @@ program
     });
   });
 
+program
+  .command("assert-screenshot")
+  .description("Assert visual match between current game viewport and golden reference image")
+  .requiredOption("--golden <path>", "Golden reference PNG image path")
+  .option("--threshold <tolerance>", "Maximum allowed pixel mismatch ratio (0.0 to 1.0)", "0.02")
+  .option("--output <path>", "Save captured screenshot to file")
+  .action(async (opts: { golden: string; threshold: string; output?: string }) => {
+    const gopts = program.opts();
+    const client = new GodotClient({ host: gopts.host, port: gopts.port });
+    try {
+      const response = await client.send("screenshot", {});
+      if (response.status === "error") {
+        process.stderr.write(`Error: ${response.error}\n`);
+        process.exit(1);
+      }
+      const data = response.data as { base64_png: string; width: number; height: number };
+      const currentBuf = Buffer.from(data.base64_png, "base64");
+
+      if (opts.output) {
+        fs.writeFileSync(path.resolve(opts.output), currentBuf);
+      }
+
+      const goldenPath = path.resolve(opts.golden);
+      if (!fs.existsSync(goldenPath)) {
+        process.stderr.write(`Error: Golden reference image not found at ${goldenPath}\n`);
+        process.exit(1);
+      }
+      const goldenBuf = fs.readFileSync(goldenPath);
+
+      let diffBytes = 0;
+      const minLen = Math.min(currentBuf.length, goldenBuf.length);
+      const maxLen = Math.max(currentBuf.length, goldenBuf.length);
+      for (let i = 0; i < minLen; i++) {
+        if (currentBuf[i] !== goldenBuf[i]) diffBytes++;
+      }
+      diffBytes += (maxLen - minLen);
+      const diffRatio = diffBytes / maxLen;
+      const thresholdNum = parseFloat(opts.threshold);
+
+      const passed = diffRatio <= thresholdNum;
+      const resultData = {
+        passed,
+        diff_ratio: parseFloat(diffRatio.toFixed(4)),
+        threshold: thresholdNum,
+        golden: goldenPath,
+        width: data.width,
+        height: data.height,
+      };
+
+      process.stdout.write(JSON.stringify({ status: passed ? "ok" : "error", data: resultData }, null, 2) + "\n");
+      if (!passed) {
+        process.exit(1);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`Assert Screenshot Error: ${msg}\n`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("init-mcp")
+  .description("Generate or update .mcp.json snippet to register godot-cli-mcp server")
+  .action(async () => {
+    try {
+      const mcpPath = path.resolve(".mcp.json");
+      let mcpConfig: any = { mcpServers: {} };
+      if (fs.existsSync(mcpPath)) {
+        try {
+          mcpConfig = JSON.parse(fs.readFileSync(mcpPath, "utf-8"));
+          if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+        } catch {
+          mcpConfig = { mcpServers: {} };
+        }
+      }
+      mcpConfig.mcpServers["godot-cli"] = {
+        command: "npx",
+        args: ["-y", "godot-cli-mcp"],
+      };
+      fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2) + "\n");
+      process.stdout.write(JSON.stringify({
+        status: "ok",
+        message: "Successfully updated .mcp.json with godot-cli-mcp server entry!",
+        path: mcpPath,
+      }, null, 2) + "\n");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`Init MCP Error: ${msg}\n`);
+      process.exit(1);
+    }
+  });
+
 // ---------------------------------------------------------------------------
 
 program.action(async () => {
