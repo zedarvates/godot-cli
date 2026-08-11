@@ -988,6 +988,32 @@ program
   });
 
 program
+  .command("greformer-export-obj")
+  .description("Export a GReFormer node geometry to Wavefront .obj file")
+  .argument("<node-path>", "Path to GReFormer node")
+  .option("--output <path>", "Output file path (default res://exported_mesh.obj)", "res://exported_mesh.obj")
+  .action(async (nodePath, opts) => {
+    await run("greformer_export_obj", {
+      node_path: nodePath,
+      output_path: opts.output,
+    });
+  });
+
+program
+  .command("greformer-preset")
+  .description("Create an architectural blockout preset (Wall, Ramp, Pillar, Arch, Doorway)")
+  .option("--preset <type>", "Wall, Ramp, Pillar, Arch, Doorway", "Wall")
+  .option("--name <name>", "Object name", "GReFormer_Preset")
+  .option("--position <pos>", "Position [x,y,z]")
+  .action(async (opts) => {
+    await run("greformer_create_preset", {
+      preset: opts.preset,
+      name: opts.name,
+      position: opts.position ? parseValue(opts.position) : undefined,
+    });
+  });
+
+program
   .command("init-mcp")
   .description("Generate or update .mcp.json snippet to register godot-cli-mcp server")
   .action(async () => {

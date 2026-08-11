@@ -393,6 +393,8 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_greformer_push_pull": commandName = "greformer_push_pull"; break;
           case "godot_greformer_apply_hotspot": commandName = "greformer_apply_hotspot"; break;
           case "godot_greformer_bake": commandName = "greformer_bake"; break;
+          case "godot_greformer_export_obj": commandName = "greformer_export_obj"; break;
+          case "godot_greformer_create_preset": commandName = "greformer_create_preset"; break;
           case "godot_capture_sequence": commandName = "capture_sequence"; break;
           case "godot_export_project_api": commandName = "export_project_api"; break;
           default:

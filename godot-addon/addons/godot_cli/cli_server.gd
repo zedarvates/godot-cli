@@ -2,9 +2,82 @@ extends Node
 ## GodotCLI Server
 ## TCP server that accepts newline-delimited JSON commands for controlling the running game.
 ## Protocol: Each message is a JSON object followed by \n.
-## Target: Godot 4.6.x
+## Target: Godot 4.7.x
 
 const DEFAULT_PORT := 9900
+const BIND_ADDRESS := "127.0.0.1"
+const PROTOCOL_VERSION := 1
+const ADDON_VERSION := "0.1.0-uo.6"
+const MIN_TOKEN_LENGTH := 32
+const MAX_MESSAGE_BYTES := 1024 * 1024
+const MAX_RESPONSE_BYTES := 16 * 1024 * 1024
+const MAX_FILE_BYTES := 4 * 1024 * 1024
+const MAX_DIRECTORY_ENTRIES := 4096
+const MAX_CLIENTS := 8
+const AUTH_TIMEOUT_MSEC := 2000
+const MAX_PENDING_WAITS := 8
+const MAX_WAIT_TIMEOUT_SECONDS := 300.0
+const MIN_WAIT_INTERVAL_SECONDS := 0.01
+const MAX_WAIT_INTERVAL_SECONDS := 5.0
+const MAX_SCENE_TREE_DEPTH := 64
+const MAX_SCENE_NODES := 4096
+const MAX_VISIBLE_NODES := 4096
+const MAX_ASSERT_CHECKS := 256
+
+const READ_ONLY_COMMANDS := {
+	"ping": true,
+	"commands": true,
+	"server_info": true,
+	"scene_tree": true,
+	"get_node": true,
+	"screenshot": true,
+	"read_file": true,
+	"list_files": true,
+	"list_classes": true,
+	"class_info": true,
+	"wait_for": true,
+	"assert": true,
+	"validate_scene": true,
+	"viewport_info": true,
+	"visible_nodes": true,
+	"inspect_level_layout": true,
+}
+
+const MUTATING_COMMANDS := {
+	"set_property": true,
+	"add_node": true,
+	"remove_node": true,
+	"reparent_node": true,
+	"rename_node": true,
+	"click": true,
+	"press_key": true,
+	"mouse_move": true,
+	"load_scene": true,
+	"spawn_3d_object": true,
+	"transform_3d_node": true,
+	"duplicate_3d_node": true,
+	"greformer_create": true,
+	"greformer_push_pull": true,
+	"greformer_apply_hotspot": true,
+	"greformer_bake": true,
+	"greformer_export_obj": true,
+	"greformer_create_preset": true,
+}
+
+const UNSAFE_COMMANDS := {
+	"call_method": true,
+	"eval": true,
+	"create_file": true,
+	"delete_file": true,
+	"attach_script": true,
+	"detach_script": true,
+	"save_scene": true,
+}
+
+var _auth_token := ""
+var _allow_mutations := false
+var _allow_unsafe := false
+var _listen_port := DEFAULT_PORT
 
 var _server: TCPServer = null
 var _clients: Array[Dictionary] = []
@@ -13,17 +86,49 @@ var _pending_waits: Array[Dictionary] = []
 # --- Lifecycle ---
 
 func _ready() -> void:
+	if not OS.is_debug_build():
+		push_error("GodotCLI: Refusing to start outside an editor or debug build")
+		set_process(false)
+		return
+
+	_auth_token = OS.get_environment("GODOT_CLI_TOKEN").strip_edges()
+	if _auth_token.length() < MIN_TOKEN_LENGTH:
+		push_error("GodotCLI: GODOT_CLI_TOKEN must contain at least %d characters" % MIN_TOKEN_LENGTH)
+		set_process(false)
+		return
+
+	_allow_mutations = _env_flag_enabled("GODOT_CLI_ALLOW_MUTATIONS")
+	_allow_unsafe = _env_flag_enabled("GODOT_CLI_ALLOW_UNSAFE")
+
 	var port := DEFAULT_PORT
+	var env_port := OS.get_environment("GODOT_CLI_PORT").strip_edges()
+	if env_port.is_valid_int():
+		port = env_port.to_int()
 	for arg in OS.get_cmdline_args():
 		if arg.begins_with("--godot-cli-port="):
 			port = int(arg.split("=")[1])
+	if port < 1 or port > 65535:
+		push_error("GodotCLI: Invalid port %d" % port)
+		set_process(false)
+		return
 
 	_server = TCPServer.new()
-	var err := _server.listen(port)
+	var err := _server.listen(port, BIND_ADDRESS)
 	if err != OK:
-		push_error("GodotCLI: Failed to listen on port %d: %s" % [port, error_string(err)])
+		push_error("GodotCLI: Failed to listen on %s:%d: %s" % [BIND_ADDRESS, port, error_string(err)])
 		return
-	print("GodotCLI: Server listening on port %d" % port)
+	_listen_port = port
+	var mode := "read-only"
+	if _allow_unsafe:
+		mode = "unsafe"
+	elif _allow_mutations:
+		mode = "mutating"
+	print("GodotCLI: Server listening on %s:%d (%s mode)" % [BIND_ADDRESS, port, mode])
+
+
+func _env_flag_enabled(name: String) -> bool:
+	var value := OS.get_environment(name).strip_edges().to_lower()
+	return value == "1" or value == "true" or value == "yes" or value == "on"
 
 
 func _process(_delta: float) -> void:
@@ -33,7 +138,21 @@ func _process(_delta: float) -> void:
 	# Accept new connections
 	while _server.is_connection_available():
 		var peer := _server.take_connection()
-		_clients.append({"peer": peer, "buffer": ""})
+		if _clients.size() >= MAX_CLIENTS:
+			var rejection := JSON.stringify({
+				"id": "",
+				"status": "error",
+				"error": "Maximum concurrent client limit reached",
+			}) + "\n"
+			peer.put_data(rejection.to_utf8_buffer())
+			peer.disconnect_from_host()
+			continue
+		_clients.append({
+			"peer": peer,
+			"buffer": "",
+			"connected_at_ms": Time.get_ticks_msec(),
+			"authenticated": false,
+		})
 
 	# Process each client
 	var to_remove: Array[int] = []
@@ -49,7 +168,19 @@ func _process(_delta: float) -> void:
 					var data := peer.get_data(available)
 					if data[0] == OK:
 						client["buffer"] += data[1].get_string_from_utf8()
+						if (client["buffer"] as String).to_utf8_buffer().size() > MAX_MESSAGE_BYTES:
+							_send(client, {"id": "", "status": "error", "error": "Request exceeds the maximum message size"})
+							peer.disconnect_from_host()
+							to_remove.append(i)
+							continue
 						_process_buffer(client)
+				if (
+					not bool(client.get("authenticated", false))
+					and Time.get_ticks_msec() - int(client["connected_at_ms"]) >= AUTH_TIMEOUT_MSEC
+				):
+					_send(client, {"id": "", "status": "error", "error": "Authentication timeout"})
+					peer.disconnect_from_host()
+					to_remove.append(i)
 			StreamPeerTCP.STATUS_ERROR, StreamPeerTCP.STATUS_NONE:
 				to_remove.append(i)
 
@@ -76,34 +207,171 @@ func _process_buffer(client: Dictionary) -> void:
 		client["buffer"] = buf.substr(idx + 1)
 		if line.strip_edges().is_empty():
 			continue
-		_handle_message(client, line)
+		if not _handle_message(client, line):
+			break
 
 
-func _handle_message(client: Dictionary, line: String) -> void:
+func _handle_message(client: Dictionary, line: String) -> bool:
 	var parsed = JSON.parse_string(line)
-	if parsed == null:
+	if parsed == null or not parsed is Dictionary:
 		_send(client, {"id": "", "status": "error", "error": "Invalid JSON"})
-		return
+		return true
 
-	var id: String = str(parsed.get("id", ""))
-	var command: String = str(parsed.get("command", ""))
-	var params: Dictionary = parsed.get("params", {})
+	var request: Dictionary = parsed
+	var id: String = str(request.get("id", ""))
+	var supplied_token := str(request.get("token", ""))
+	if not _constant_time_equals(supplied_token, _auth_token):
+		_send(client, {"id": id, "status": "error", "error": "Authentication failed"})
+		var peer: StreamPeerTCP = client["peer"]
+		peer.disconnect_from_host()
+		return false
+	client["authenticated"] = true
+
+	var command: String = str(request.get("command", ""))
+	var raw_params = request.get("params", {})
+	if not raw_params is Dictionary:
+		_send(client, {"id": id, "status": "error", "error": "Invalid params"})
+		return true
+	var params: Dictionary = raw_params
 
 	var result = _execute(command, params, client, id)
 	if result != null:
 		result["id"] = id
 		_send(client, result)
+	return true
 
 
 func _send(client: Dictionary, response: Dictionary) -> void:
 	var json := JSON.stringify(response) + "\n"
+	if json.to_utf8_buffer().size() > MAX_RESPONSE_BYTES:
+		json = JSON.stringify({
+			"id": response.get("id", ""),
+			"status": "error",
+			"error": "Response exceeds the maximum message size",
+		}) + "\n"
 	var peer: StreamPeerTCP = client["peer"]
 	peer.put_data(json.to_utf8_buffer())
+
+
+func _constant_time_equals(left: String, right: String) -> bool:
+	var left_bytes := left.to_utf8_buffer()
+	var right_bytes := right.to_utf8_buffer()
+	var difference := left_bytes.size() ^ right_bytes.size()
+	var max_size: int = maxi(left_bytes.size(), right_bytes.size())
+	for index in range(max_size):
+		var left_value: int = left_bytes[index] if index < left_bytes.size() else 0
+		var right_value: int = right_bytes[index] if index < right_bytes.size() else 0
+		difference |= left_value ^ right_value
+	return difference == 0
+
+func _sorted_command_names(commands: Dictionary) -> Array[String]:
+	var names: Array[String] = []
+	for command in commands.keys():
+		names.append(str(command))
+	names.sort()
+	return names
+
+
+func _cmd_server_info(_params: Dictionary) -> Dictionary:
+	return {"status": "ok", "data": {
+		"protocol_version": PROTOCOL_VERSION,
+		"addon_version": ADDON_VERSION,
+		"engine": Engine.get_version_info(),
+		"renderer": RenderingServer.get_current_rendering_method(),
+		"debug_build": OS.is_debug_build(),
+		"endpoint": {
+			"bind_address": BIND_ADDRESS,
+			"port": _listen_port,
+		},
+		"gates": {
+			"mutations_enabled": _allow_mutations,
+			"unsafe_enabled": _allow_unsafe,
+		},
+		"limits": {
+			"max_request_bytes": MAX_MESSAGE_BYTES,
+			"max_response_bytes": MAX_RESPONSE_BYTES,
+			"max_file_bytes": MAX_FILE_BYTES,
+			"max_directory_entries": MAX_DIRECTORY_ENTRIES,
+			"max_clients": MAX_CLIENTS,
+			"authentication_timeout_ms": AUTH_TIMEOUT_MSEC,
+			"max_pending_waits": MAX_PENDING_WAITS,
+			"max_wait_timeout_seconds": MAX_WAIT_TIMEOUT_SECONDS,
+			"min_wait_interval_seconds": MIN_WAIT_INTERVAL_SECONDS,
+			"max_wait_interval_seconds": MAX_WAIT_INTERVAL_SECONDS,
+			"max_scene_tree_depth": MAX_SCENE_TREE_DEPTH,
+			"max_scene_nodes": MAX_SCENE_NODES,
+			"max_visible_nodes": MAX_VISIBLE_NODES,
+			"max_assert_checks": MAX_ASSERT_CHECKS,
+		},
+		"commands": {
+			"read_only": _sorted_command_names(READ_ONLY_COMMANDS),
+			"mutating": _sorted_command_names(MUTATING_COMMANDS),
+			"unsafe": _sorted_command_names(UNSAFE_COMMANDS),
+		},
+	}}
+
+
+func _cmd_ping(_params: Dictionary) -> Dictionary:
+	return {"status": "ok", "data": {
+		"ready": true,
+		"protocol_version": PROTOCOL_VERSION,
+		"addon_version": ADDON_VERSION,
+		"engine": Engine.get_version_info(),
+		"endpoint": {
+			"bind_address": BIND_ADDRESS,
+			"port": _listen_port,
+		},
+		"gates": {
+			"mutations_enabled": _allow_mutations,
+			"unsafe_enabled": _allow_unsafe,
+		},
+	}}
+
+
+func _command_catalog_entries(
+	commands: Dictionary,
+	security: String,
+	enabled: bool,
+	required_gate: String
+) -> Array[Dictionary]:
+	var entries: Array[Dictionary] = []
+	for command in _sorted_command_names(commands):
+		entries.append({
+			"name": command,
+			"security": security,
+			"enabled": enabled,
+			"required_gate": required_gate,
+			"conditionally_unsafe": command == "wait_for" or command == "assert",
+		})
+	return entries
+
+
+func _cmd_commands(_params: Dictionary) -> Dictionary:
+	var entries: Array[Dictionary] = []
+	entries.append_array(_command_catalog_entries(READ_ONLY_COMMANDS, "read_only", true, "none"))
+	entries.append_array(_command_catalog_entries(MUTATING_COMMANDS, "mutating", _allow_mutations, "GODOT_CLI_ALLOW_MUTATIONS"))
+	entries.append_array(_command_catalog_entries(UNSAFE_COMMANDS, "unsafe", _allow_unsafe, "GODOT_CLI_ALLOW_UNSAFE"))
+	return {"status": "ok", "data": {
+		"count": entries.size(),
+		"commands": entries,
+		"gates": {
+			"mutations_enabled": _allow_mutations,
+			"unsafe_enabled": _allow_unsafe,
+		},
+	}}
+
 
 # --- Command Dispatch ---
 
 func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: String = "") -> Variant:
+	var denial := _command_denial(command, params)
+	if not denial.is_empty():
+		return {"status": "error", "error": denial}
+
 	match command:
+		"ping": return _cmd_ping(params)
+		"commands": return _cmd_commands(params)
+		"server_info": return _cmd_server_info(params)
 		"scene_tree": return _cmd_scene_tree(params)
 		"get_node": return _cmd_get_node(params)
 		"set_property": return _cmd_set_property(params)
@@ -134,18 +402,6 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"validate_scene": return _cmd_validate_scene(params)
 		"viewport_info": return _cmd_viewport_info(params)
 		"visible_nodes": return _cmd_visible_nodes(params)
-		"ping": return {"status": "ok", "data": {"pong": true, "engine": "Godot " + Engine.get_version_info()["string"]}}
-		"batch_execute": return _cmd_batch_execute(params, client, id)
-		"get_logs": return _cmd_get_logs(params)
-		"list_signals": return _cmd_list_signals(params)
-		"emit_signal": return _cmd_emit_signal(params)
-		"query_ray": return _cmd_query_ray(params)
-		"query_point": return _cmd_query_point(params)
-		"action_press": return _cmd_action_press(params)
-		"action_release": return _cmd_action_release(params)
-		"metrics": return _cmd_metrics(params)
-		"highlight_node": return _cmd_highlight_node(params)
-		"find_nodes": return _cmd_find_nodes(params)
 		"spawn_3d_object": return _cmd_spawn_3d_object(params)
 		"transform_3d_node": return _cmd_transform_3d_node(params)
 		"inspect_level_layout": return _cmd_inspect_level_layout(params)
@@ -154,12 +410,40 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"greformer_push_pull": return _cmd_greformer_push_pull(params)
 		"greformer_apply_hotspot": return _cmd_greformer_apply_hotspot(params)
 		"greformer_bake": return _cmd_greformer_bake(params)
-		"query_path_3d": return _cmd_query_path_3d(params)
-		"set_shader_param": return _cmd_set_shader_param(params)
-		"play_animation": return _cmd_play_animation(params)
-		"capture_sequence": return _cmd_capture_sequence(params)
-		"export_project_api": return _cmd_export_project_api(params)
+		"greformer_export_obj": return _cmd_greformer_export_obj(params)
+		"greformer_create_preset": return _cmd_greformer_create_preset(params)
 		_: return {"status": "error", "error": "Unknown command: " + command}
+
+
+func _command_denial(command: String, params: Dictionary) -> String:
+	if READ_ONLY_COMMANDS.has(command):
+		if _params_require_unsafe(command, params) and not _allow_unsafe:
+			return "Expression execution is disabled; set GODOT_CLI_ALLOW_UNSAFE=1 before launching Godot"
+		return ""
+	if MUTATING_COMMANDS.has(command):
+		if not _allow_mutations:
+			return "Mutation commands are disabled; set GODOT_CLI_ALLOW_MUTATIONS=1 before launching Godot"
+		return ""
+	if UNSAFE_COMMANDS.has(command):
+		if not _allow_unsafe:
+			return "Unsafe commands are disabled; set GODOT_CLI_ALLOW_UNSAFE=1 before launching Godot"
+		return ""
+	return ""
+
+
+func _params_require_unsafe(command: String, params: Dictionary) -> bool:
+	if command == "wait_for":
+		return not str(params.get("expr", "")).is_empty()
+	if command != "assert":
+		return false
+	if not str(params.get("expr", "")).is_empty():
+		return true
+	var checks = params.get("checks", [])
+	if checks is Array:
+		for check in checks:
+			if check is Dictionary and (check as Dictionary).has("expr"):
+				return true
+	return false
 
 # ============================================================
 # Serialization
@@ -317,8 +601,19 @@ func _deserialize(value: Variant) -> Variant:
 # --- Scene Tree ---
 
 func _cmd_scene_tree(params: Dictionary) -> Dictionary:
-	var max_depth: int = params.get("depth", 10)
+	var raw_depth = params.get("depth", 10)
 	var root_path: String = params.get("root", "")
+	if not (raw_depth is int or raw_depth is float):
+		return {"status": "error", "error": "scene-tree depth must be an integer"}
+	var depth_number := float(raw_depth)
+	if is_nan(depth_number) or is_inf(depth_number) or depth_number != floor(depth_number):
+		return {"status": "error", "error": "scene-tree depth must be an integer"}
+	var max_depth := int(depth_number)
+	if max_depth < 0 or max_depth > MAX_SCENE_TREE_DEPTH:
+		return {
+			"status": "error",
+			"error": "scene-tree depth must be between 0 and %d" % MAX_SCENE_TREE_DEPTH,
+		}
 
 	var root: Node
 	if root_path.is_empty():
@@ -328,10 +623,18 @@ func _cmd_scene_tree(params: Dictionary) -> Dictionary:
 		if root == null:
 			return {"status": "error", "error": "Node not found: " + root_path}
 
-	return {"status": "ok", "data": _build_tree(root, max_depth)}
+	var traversal := {"visited": 0, "truncated": false}
+	var tree := _build_tree(root, max_depth, 0, traversal)
+	tree["_cli"] = {
+		"visited_nodes": traversal["visited"],
+		"truncated": traversal["truncated"],
+		"max_nodes": MAX_SCENE_NODES,
+	}
+	return {"status": "ok", "data": tree}
 
 
-func _build_tree(node: Node, max_depth: int, depth: int = 0) -> Dictionary:
+func _build_tree(node: Node, max_depth: int, depth: int, traversal: Dictionary) -> Dictionary:
+	traversal["visited"] = int(traversal["visited"]) + 1
 	var data: Dictionary = {
 		"name": str(node.name),
 		"type": node.get_class(),
@@ -344,7 +647,11 @@ func _build_tree(node: Node, max_depth: int, depth: int = 0) -> Dictionary:
 	var children: Array = []
 	if depth < max_depth:
 		for child in node.get_children():
-			children.append(_build_tree(child, max_depth, depth + 1))
+			if int(traversal["visited"]) >= MAX_SCENE_NODES:
+				traversal["truncated"] = true
+				data["truncated_children"] = node.get_child_count() - children.size()
+				break
+			children.append(_build_tree(child, max_depth, depth + 1, traversal))
 	elif node.get_child_count() > 0:
 		data["child_count"] = node.get_child_count()
 	data["children"] = children
@@ -535,9 +842,9 @@ func _cmd_call_method(params: Dictionary) -> Dictionary:
 # --- Eval ---
 
 func _cmd_eval(params: Dictionary) -> Dictionary:
-	var code: String = params.get("code", "")
+	var code: String = params.get("code", params.get("expression", ""))
 	if code.is_empty():
-		return {"status": "error", "error": "Missing 'code' parameter"}
+		return {"status": "error", "error": "Missing 'code' or 'expression' parameter"}
 
 	var script := GDScript.new()
 	var lines := code.split("\n")
@@ -668,6 +975,21 @@ func _cmd_mouse_move(params: Dictionary) -> Dictionary:
 
 # --- File Operations ---
 
+func _resolve_project_path(path: String) -> String:
+	if not path.begins_with("res://"):
+		return ""
+	var project_root := ProjectSettings.globalize_path("res://").simplify_path()
+	var resolved := ProjectSettings.globalize_path(path).simplify_path()
+	var root_prefix := project_root
+	if not root_prefix.ends_with("/"):
+		root_prefix += "/"
+	var resolved_lower := resolved.to_lower()
+	var root_lower := project_root.to_lower()
+	var prefix_lower := root_prefix.to_lower()
+	if resolved_lower != root_lower and not resolved_lower.begins_with(prefix_lower):
+		return ""
+	return resolved
+
 func _cmd_create_file(params: Dictionary) -> Dictionary:
 	var path: String = params.get("path", "")
 	var content: String = params.get("content", "")
@@ -675,9 +997,12 @@ func _cmd_create_file(params: Dictionary) -> Dictionary:
 	if path.is_empty():
 		return {"status": "error", "error": "Missing 'path' parameter"}
 
-	var abs_path := path
-	if path.begins_with("res://"):
-		abs_path = ProjectSettings.globalize_path(path)
+	var abs_path := _resolve_project_path(path)
+	if abs_path.is_empty():
+		return {"status": "error", "error": "Path must stay inside res://"}
+	var content_size := content.to_utf8_buffer().size()
+	if content_size > MAX_FILE_BYTES:
+		return {"status": "error", "error": "File content exceeds the maximum size"}
 
 	# Ensure parent directory exists
 	DirAccess.make_dir_recursive_absolute(abs_path.get_base_dir())
@@ -689,7 +1014,7 @@ func _cmd_create_file(params: Dictionary) -> Dictionary:
 	file.store_string(content)
 	file.close()
 
-	return {"status": "ok", "data": {"path": path, "size": content.length()}}
+	return {"status": "ok", "data": {"path": path, "size": content_size}}
 
 
 func _cmd_read_file(params: Dictionary) -> Dictionary:
@@ -697,13 +1022,16 @@ func _cmd_read_file(params: Dictionary) -> Dictionary:
 	if path.is_empty():
 		return {"status": "error", "error": "Missing 'path' parameter"}
 
-	var abs_path := path
-	if path.begins_with("res://"):
-		abs_path = ProjectSettings.globalize_path(path)
+	var abs_path := _resolve_project_path(path)
+	if abs_path.is_empty():
+		return {"status": "error", "error": "Path must stay inside res://"}
 
 	var file := FileAccess.open(abs_path, FileAccess.READ)
 	if file == null:
 		return {"status": "error", "error": "Cannot read file: " + error_string(FileAccess.get_open_error())}
+	if file.get_length() > MAX_FILE_BYTES:
+		file.close()
+		return {"status": "error", "error": "File exceeds the maximum readable size"}
 
 	var content := file.get_as_text()
 	file.close()
@@ -715,13 +1043,13 @@ func _cmd_list_files(params: Dictionary) -> Dictionary:
 	var path: String = params.get("path", "res://")
 	var pattern: String = params.get("pattern", "")
 
-	var abs_path := path
-	if path.begins_with("res://"):
-		abs_path = ProjectSettings.globalize_path(path)
+	var abs_path := _resolve_project_path(path)
+	if abs_path.is_empty():
+		return {"status": "error", "error": "Path must stay inside res://"}
 
 	var dir := DirAccess.open(abs_path)
 	if dir == null:
-		return {"status": "error", "error": "Cannot open directory: " + error_string(DirAccess.get_open_error())}
+		return {"status": "error", "error": "Cannot open directory: " + error_string(DirAccess.get_dir_access_error())}
 
 	var files: Array = []
 	var dirs: Array = []
@@ -730,6 +1058,9 @@ func _cmd_list_files(params: Dictionary) -> Dictionary:
 	var file_name := dir.get_next()
 	while file_name != "":
 		if not file_name.begins_with("."):
+			if files.size() + dirs.size() >= MAX_DIRECTORY_ENTRIES:
+				dir.list_dir_end()
+				return {"status": "error", "error": "Directory exceeds the maximum entry count"}
 			if dir.current_is_dir():
 				dirs.append(file_name)
 			elif pattern.is_empty() or file_name.match(pattern):
@@ -748,9 +1079,9 @@ func _cmd_delete_file(params: Dictionary) -> Dictionary:
 	if path.is_empty():
 		return {"status": "error", "error": "Missing 'path' parameter"}
 
-	var abs_path := path
-	if path.begins_with("res://"):
-		abs_path = ProjectSettings.globalize_path(path)
+	var abs_path := _resolve_project_path(path)
+	if abs_path.is_empty():
+		return {"status": "error", "error": "Path must stay inside res://"}
 
 	var err := DirAccess.remove_absolute(abs_path)
 	if err != OK:
@@ -766,6 +1097,8 @@ func _cmd_attach_script(params: Dictionary) -> Dictionary:
 
 	if node_path.is_empty() or script_path.is_empty():
 		return {"status": "error", "error": "Missing 'path' or 'script' parameter"}
+	if _resolve_project_path(script_path).is_empty():
+		return {"status": "error", "error": "Script path must stay inside res://"}
 
 	var node := get_tree().root.get_node_or_null(node_path)
 	if node == null:
@@ -797,6 +1130,8 @@ func _cmd_load_scene(params: Dictionary) -> Dictionary:
 	var path: String = params.get("path", "")
 	if path.is_empty():
 		return {"status": "error", "error": "Missing 'path' parameter"}
+	if _resolve_project_path(path).is_empty():
+		return {"status": "error", "error": "Scene path must stay inside res://"}
 
 	var err := get_tree().change_scene_to_file(path)
 	if err != OK:
@@ -815,6 +1150,8 @@ func _cmd_save_scene(params: Dictionary) -> Dictionary:
 		path = root.scene_file_path
 	if path.is_empty():
 		return {"status": "error", "error": "No path specified and scene has no file path"}
+	if _resolve_project_path(path).is_empty():
+		return {"status": "error", "error": "Scene path must stay inside res://"}
 
 	# Set owner on all descendants so they get saved
 	_set_owner_recursive(root, root)
@@ -971,11 +1308,41 @@ func _cmd_wait_for(params: Dictionary, client: Dictionary, id: String) -> void:
 	var expr: String = params.get("expr", "")
 	var node_path: String = params.get("path", "")
 	var property: String = params.get("property", "")
-	var timeout: float = params.get("timeout", 10.0)
-	var interval: float = params.get("interval", 0.1)
+	var raw_timeout = params.get("timeout", 10.0)
+	var raw_interval = params.get("interval", 0.1)
 
 	if expr.is_empty() and (node_path.is_empty() or property.is_empty()):
 		_send(client, {"id": id, "status": "error", "error": "Provide 'expr' or 'path' + 'property'"})
+		return
+	if not (raw_timeout is int or raw_timeout is float):
+		_send(client, {"id": id, "status": "error", "error": "wait-for timeout must be numeric"})
+		return
+	if not (raw_interval is int or raw_interval is float):
+		_send(client, {"id": id, "status": "error", "error": "wait-for interval must be numeric"})
+		return
+	var timeout := float(raw_timeout)
+	var interval := float(raw_interval)
+	if is_nan(timeout) or is_inf(timeout) or timeout <= 0.0 or timeout > MAX_WAIT_TIMEOUT_SECONDS:
+		_send(client, {
+			"id": id,
+			"status": "error",
+			"error": "wait-for timeout must be greater than 0 and at most %.1f seconds" % MAX_WAIT_TIMEOUT_SECONDS,
+		})
+		return
+	if (
+		is_nan(interval)
+		or is_inf(interval)
+		or interval < MIN_WAIT_INTERVAL_SECONDS
+		or interval > MAX_WAIT_INTERVAL_SECONDS
+	):
+		_send(client, {
+			"id": id,
+			"status": "error",
+			"error": "wait-for interval must be between %.2f and %.1f seconds" % [MIN_WAIT_INTERVAL_SECONDS, MAX_WAIT_INTERVAL_SECONDS],
+		})
+		return
+	if _pending_waits.size() >= MAX_PENDING_WAITS:
+		_send(client, {"id": id, "status": "error", "error": "Maximum pending wait-for limit reached"})
 		return
 
 	var compiled_script: GDScript = null
@@ -993,25 +1360,30 @@ func _cmd_wait_for(params: Dictionary, client: Dictionary, id: String) -> void:
 		if params.has("equals"):
 			description += " == " + str(params["equals"])
 
-	_pending_waits.append({
+	var pending_wait := {
 		"client": client,
 		"id": id,
 		"expr": expr,
 		"path": node_path,
 		"property": property,
-		"equals": params.get("equals"),
 		"timeout": timeout,
 		"interval": interval,
 		"script": compiled_script,
 		"description": description,
 		"start_ms": Time.get_ticks_msec(),
 		"last_check_ms": 0,
-	})
+	}
+	if params.has("equals"):
+		pending_wait["equals"] = params["equals"]
+	_pending_waits.append(pending_wait)
 
 # --- Assert ---
 
 func _cmd_assert(params: Dictionary) -> Dictionary:
-	var checks: Array = params.get("checks", [])
+	var raw_checks = params.get("checks", [])
+	if not raw_checks is Array:
+		return {"status": "error", "error": "assert checks must be an array"}
+	var checks: Array = raw_checks
 
 	# Support single expression shorthand
 	var expr: String = params.get("expr", "")
@@ -1024,6 +1396,14 @@ func _cmd_assert(params: Dictionary) -> Dictionary:
 
 	if checks.is_empty():
 		return {"status": "error", "error": "No checks provided. Use 'expr', 'path'+'property', or 'checks' array."}
+	if checks.size() > MAX_ASSERT_CHECKS:
+		return {
+			"status": "error",
+			"error": "assert supports at most %d checks per request" % MAX_ASSERT_CHECKS,
+		}
+	for check in checks:
+		if not check is Dictionary:
+			return {"status": "error", "error": "assert check entries must be objects"}
 
 	var results: Array = []
 	var all_passed := true
@@ -1149,12 +1529,26 @@ func _cmd_validate_scene(_params: Dictionary) -> Dictionary:
 
 	var errors: Array = []
 	var warnings: Array = []
+	var traversal := {
+		"visited": 0,
+		"truncated": false,
+		"cameras_2d": [],
+		"cameras_3d": [],
+	}
 
-	_validate_recursive(root, errors, warnings)
-	_validate_cameras(root, errors, warnings)
+	_validate_recursive(root, errors, warnings, 0, traversal)
+	_validate_cameras(traversal["cameras_2d"], traversal["cameras_3d"], warnings)
+	if bool(traversal["truncated"]):
+		errors.append({
+			"rule": "validation_budget_exceeded",
+			"message": "Scene validation stopped after %d nodes or %d levels" % [MAX_SCENE_NODES, MAX_SCENE_TREE_DEPTH],
+		})
 
 	return {"status": "ok", "data": {
 		"valid": errors.is_empty(),
+		"complete": not bool(traversal["truncated"]),
+		"visited_nodes": traversal["visited"],
+		"max_nodes": MAX_SCENE_NODES,
 		"error_count": errors.size(),
 		"warning_count": warnings.size(),
 		"errors": errors,
@@ -1162,17 +1556,35 @@ func _cmd_validate_scene(_params: Dictionary) -> Dictionary:
 	}}
 
 
-func _validate_recursive(node: Node, errors: Array, warnings: Array) -> void:
+func _validate_recursive(
+	node: Node,
+	errors: Array,
+	warnings: Array,
+	depth: int,
+	traversal: Dictionary
+) -> void:
+	if int(traversal["visited"]) >= MAX_SCENE_NODES or depth > MAX_SCENE_TREE_DEPTH:
+		traversal["truncated"] = true
+		return
+	traversal["visited"] = int(traversal["visited"]) + 1
+	if node is Camera2D:
+		(traversal["cameras_2d"] as Array).append(node)
+	elif node is Camera3D:
+		(traversal["cameras_3d"] as Array).append(node)
 	var path := str(node.get_path())
 
 	# Rule: Physics bodies must have collision shapes
 	if node is PhysicsBody2D or node is Area2D:
 		var has_shape := false
-		for child in node.get_children():
+		var child_count := node.get_child_count()
+		for child_index in range(mini(child_count, MAX_SCENE_NODES)):
+			var child := node.get_child(child_index)
 			if child is CollisionShape2D or child is CollisionPolygon2D:
 				has_shape = true
 				break
-		if not has_shape:
+		if child_count > MAX_SCENE_NODES:
+			traversal["truncated"] = true
+		elif not has_shape:
 			errors.append({
 				"rule": "physics_body_needs_shape",
 				"path": path,
@@ -1182,11 +1594,15 @@ func _validate_recursive(node: Node, errors: Array, warnings: Array) -> void:
 
 	if node is PhysicsBody3D or node is Area3D:
 		var has_shape := false
-		for child in node.get_children():
+		var child_count := node.get_child_count()
+		for child_index in range(mini(child_count, MAX_SCENE_NODES)):
+			var child := node.get_child(child_index)
 			if child is CollisionShape3D or child is CollisionPolygon3D:
 				has_shape = true
 				break
-		if not has_shape:
+		if child_count > MAX_SCENE_NODES:
+			traversal["truncated"] = true
+		elif not has_shape:
 			errors.append({
 				"rule": "physics_body_needs_shape",
 				"path": path,
@@ -1275,13 +1691,13 @@ func _validate_recursive(node: Node, errors: Array, warnings: Array) -> void:
 
 	# Recurse
 	for child in node.get_children():
-		_validate_recursive(child, errors, warnings)
+		if bool(traversal["truncated"]):
+			break
+		_validate_recursive(child, errors, warnings, depth + 1, traversal)
 
 
-func _validate_cameras(root: Node, errors: Array, warnings: Array) -> void:
+func _validate_cameras(cameras_2d: Array, cameras_3d: Array, warnings: Array) -> void:
 	# Check 2D cameras
-	var cameras_2d: Array[Camera2D] = []
-	_find_nodes_of_type(root, "Camera2D", cameras_2d)
 	if cameras_2d.size() > 0:
 		var any_current := false
 		for cam in cameras_2d:
@@ -1290,13 +1706,11 @@ func _validate_cameras(root: Node, errors: Array, warnings: Array) -> void:
 				break
 		if not any_current:
 			warnings.append({
-				"rule": "no_current_camera",
-				"message": "Found %d Camera2D nodes but none is current" % cameras_2d.size(),
+				"rule": "no_current_camera_2d",
+				"message": "Scene has Camera2D nodes but none is marked as current",
 			})
 
 	# Check 3D cameras
-	var cameras_3d: Array[Camera3D] = []
-	_find_nodes_of_type(root, "Camera3D", cameras_3d)
 	if cameras_3d.size() > 0:
 		var any_current := false
 		for cam in cameras_3d:
@@ -1305,16 +1719,9 @@ func _validate_cameras(root: Node, errors: Array, warnings: Array) -> void:
 				break
 		if not any_current:
 			warnings.append({
-				"rule": "no_current_camera",
-				"message": "Found %d Camera3D nodes but none is current" % cameras_3d.size(),
+				"rule": "no_current_camera_3d",
+				"message": "Scene has Camera3D nodes but none is marked as current",
 			})
-
-
-func _find_nodes_of_type(node: Node, type_name: String, result: Array) -> void:
-	if node.is_class(type_name):
-		result.append(node)
-	for child in node.get_children():
-		_find_nodes_of_type(child, type_name, result)
 
 # --- Viewport Info ---
 
@@ -1364,16 +1771,30 @@ func _cmd_visible_nodes(params: Dictionary) -> Dictionary:
 
 	var viewport_rect := get_viewport().get_visible_rect()
 	var visible_nodes: Array = []
-	_collect_visible_nodes(root, visible_nodes, type_filter, viewport_rect)
+	var traversal := {"visited": 0, "truncated": false}
+	_collect_visible_nodes(root, visible_nodes, type_filter, viewport_rect, 0, traversal)
 
 	return {"status": "ok", "data": {
 		"viewport": _serialize(viewport_rect),
 		"count": visible_nodes.size(),
 		"nodes": visible_nodes,
+		"visited_nodes": traversal["visited"],
+		"truncated": traversal["truncated"],
 	}}
 
 
-func _collect_visible_nodes(node: Node, result: Array, type_filter: String, viewport_rect: Rect2) -> void:
+func _collect_visible_nodes(
+	node: Node,
+	result: Array,
+	type_filter: String,
+	viewport_rect: Rect2,
+	depth: int,
+	traversal: Dictionary
+) -> void:
+	if int(traversal["visited"]) >= MAX_SCENE_NODES or depth > MAX_SCENE_TREE_DEPTH:
+		traversal["truncated"] = true
+		return
+	traversal["visited"] = int(traversal["visited"]) + 1
 	var is_visible := true
 	var in_viewport := true
 
@@ -1406,499 +1827,301 @@ func _collect_visible_nodes(node: Node, result: Array, type_filter: String, view
 			elif node is Node3D:
 				entry["global_position"] = _serialize((node as Node3D).global_position)
 			result.append(entry)
+			if result.size() >= MAX_VISIBLE_NODES:
+				traversal["truncated"] = true
+				return
 
 	# Always recurse — children might be in viewport even if parent position is outside
 	for child in node.get_children():
-		_collect_visible_nodes(child, result, type_filter, viewport_rect)
+		if bool(traversal["truncated"]):
+			break
+		_collect_visible_nodes(child, result, type_filter, viewport_rect, depth + 1, traversal)
 
 
-func _cmd_batch_execute(params: Dictionary, client: Dictionary, id: String) -> Dictionary:
-	var commands: Array = params.get("commands", [])
-	var results: Array = []
-	for cmd in commands:
-		if cmd is Dictionary:
-			var c_name: String = str(cmd.get("command", ""))
-			var c_params: Dictionary = cmd.get("params", {})
-			var res = _execute(c_name, c_params, client, id)
-			results.append(res)
+# ============================================================
+# 3D Level Design & GReFormer LLM Commands
+# ============================================================
+
+func _cmd_spawn_3d_object(params: Dictionary) -> Variant:
+	var type_name := str(params.get("type", "MeshInstance3D"))
+	var obj_name := str(params.get("name", "New3DObject"))
+	var parent_path := str(params.get("parent_path", "/root"))
+	
+	var parent_node := get_node_or_null(parent_path)
+	if not parent_node:
+		parent_node = get_tree().edited_scene_root if get_tree().edited_scene_root else get_tree().root
+		
+	if not parent_node:
+		return {"status": "error", "error": "Parent node not found: " + parent_path}
+		
+	var new_node: Node3D = null
+	if ClassDB.can_instantiate(type_name):
+		var inst := ClassDB.instantiate(type_name)
+		if inst is Node3D:
+			new_node = inst as Node3D
+			
+	if not new_node:
+		if type_name == "GReFormerNode3D":
+			var greformer_script = load("res://addons/greformer/core/greformer_node.gd")
+			if greformer_script:
+				new_node = Node3D.new()
+				new_node.set_script(greformer_script)
 		else:
-			results.append({"status": "error", "error": "Invalid batch item format"})
-	return {"status": "ok", "data": {"results": results}}
-
-
-var _log_buffer: Array[Dictionary] = []
-const MAX_LOG_BUFFER := 500
-
-func _add_log(level: String, message: String, details: Dictionary = {}) -> void:
-	var entry := {
-		"timestamp": Time.get_ticks_msec(),
-		"level": level,
-		"message": message,
-		"details": details
+			new_node = MeshInstance3D.new()
+			
+	new_node.name = obj_name
+	parent_node.add_child(new_node)
+	if get_tree().edited_scene_root:
+		new_node.owner = get_tree().edited_scene_root
+		
+	if params.has("position"):
+		new_node.global_position = _parse_vector3(params["position"])
+	if params.has("rotation"):
+		new_node.global_rotation = _parse_vector3(params["rotation"])
+	if params.has("scale"):
+		new_node.scale = _parse_vector3(params["scale"])
+		
+	return {
+		"status": "ok",
+		"name": str(new_node.name),
+		"path": str(new_node.get_path()),
+		"position": _serialize(new_node.global_position)
 	}
-	_log_buffer.append(entry)
-	if _log_buffer.size() > MAX_LOG_BUFFER:
-		_log_buffer.remove_at(0)
 
-func _cmd_get_logs(params: Dictionary) -> Dictionary:
-	var level_filter: String = str(params.get("level", "")).to_lower()
-	var clear_after: bool = bool(params.get("clear", false))
-	var filtered: Array[Dictionary] = []
-	for item in _log_buffer:
-		if level_filter.is_empty() or str(item.get("level", "")).to_lower() == level_filter:
-			filtered.append(item)
-	if clear_after:
-		_log_buffer.clear()
-	return {"status": "ok", "data": {"logs": filtered, "count": filtered.size()}}
+func _cmd_transform_3d_node(params: Dictionary) -> Variant:
+	var node_path := str(params.get("node_path", ""))
+	var target_node := get_node_or_null(node_path) as Node3D
+	if not target_node:
+		return {"status": "error", "error": "3D Node not found: " + node_path}
+		
+	var relative := bool(params.get("relative", false))
+	
+	if params.has("position"):
+		var pos_val := _parse_vector3(params["position"])
+		if relative:
+			target_node.global_position += pos_val
+		else:
+			target_node.global_position = pos_val
+			
+	if params.has("rotation"):
+		var rot_val := _parse_vector3(params["rotation"])
+		if relative:
+			target_node.global_rotation += rot_val
+		else:
+			target_node.global_rotation = rot_val
+			
+	if params.has("scale"):
+		var scale_val := _parse_vector3(params["scale"])
+		if relative:
+			target_node.scale *= scale_val
+		else:
+			target_node.scale = scale_val
+			
+	return {
+		"status": "ok",
+		"path": str(target_node.get_path()),
+		"position": _serialize(target_node.global_position),
+		"rotation": _serialize(target_node.global_rotation),
+		"scale": _serialize(target_node.scale)
+	}
 
-func _cmd_list_signals(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("path", ""))
+func _cmd_inspect_level_layout(params: Dictionary) -> Variant:
+	var center := _parse_vector3(params.get("center_position", Vector3.ZERO))
+	var radius := float(params.get("radius", 20.0))
+	var root_path := str(params.get("node_path", "/root"))
+	
+	var root_node := get_node_or_null(root_path)
+	if not root_node:
+		root_node = get_tree().root
+		
+	var results: Array = []
+	_collect_level_3d_nodes(root_node, center, radius, results)
+	return {"status": "ok", "nodes": results, "count": results.size()}
+
+func _collect_level_3d_nodes(node: Node, center: Vector3, radius: float, results: Array) -> void:
+	if node is Node3D:
+		var n3d := node as Node3D
+		var dist := n3d.global_position.distance_to(center)
+		if dist <= radius:
+			var info: Dictionary = {
+				"name": str(n3d.name),
+				"type": n3d.get_class(),
+				"path": str(n3d.get_path()),
+				"position": _serialize(n3d.global_position),
+				"rotation": _serialize(n3d.global_rotation),
+				"scale": _serialize(n3d.scale),
+				"distance": dist
+			}
+			if n3d is MeshInstance3D and (n3d as MeshInstance3D).mesh:
+				info["mesh_type"] = (n3d as MeshInstance3D).mesh.get_class()
+			results.append(info)
+			
+	for child in node.get_children():
+		_collect_level_3d_nodes(child, center, radius, results)
+
+func _cmd_duplicate_3d_node(params: Dictionary) -> Variant:
+	var node_path := str(params.get("node_path", ""))
+	var src_node := get_node_or_null(node_path) as Node3D
+	if not src_node:
+		return {"status": "error", "error": "3D Node not found: " + node_path}
+		
+	var clone := src_node.duplicate() as Node3D
+	if params.has("new_name"):
+		clone.name = str(params["new_name"])
+		
+	var parent := src_node.get_parent()
+	if parent:
+		parent.add_child(clone)
+		if get_tree().edited_scene_root:
+			clone.owner = get_tree().edited_scene_root
+			
+	if params.has("offset_position"):
+		clone.global_position += _parse_vector3(params["offset_position"])
+		
+	return {
+		"status": "ok",
+		"name": str(clone.name),
+		"path": str(clone.get_path()),
+		"position": _serialize(clone.global_position)
+	}
+
+func _cmd_greformer_create(params: Dictionary) -> Variant:
+	var prim_type_str := str(params.get("primitive_type", "Box"))
+	var obj_name := str(params.get("name", "GReFormer_Object"))
+	var pos := _parse_vector3(params.get("position", Vector3.ZERO))
+	
+	var greformer_script = load("res://addons/greformer/core/greformer_node.gd")
+	if not greformer_script:
+		return {"status": "error", "error": "GReFormer script not found at res://addons/greformer/core/greformer_node.gd"}
+		
+	var node: Node3D = Node3D.new()
+	node.set_script(greformer_script)
+	node.name = obj_name
+	
+	var edited_root := get_tree().edited_scene_root if get_tree().edited_scene_root else get_tree().root
+	edited_root.add_child(node)
+	if get_tree().edited_scene_root:
+		node.owner = get_tree().edited_scene_root
+		
+	node.global_position = pos
+	
+	var ptype := 1 # BOX
+	if prim_type_str.findn("stair") != -1:
+		ptype = 2
+	elif prim_type_str.findn("cylin") != -1:
+		ptype = 3
+		
+	if node.has_method("generate_primitive"):
+		node.call("generate_primitive", ptype)
+		
+	return {"status": "ok", "name": str(node.name), "path": str(node.get_path()), "position": _serialize(node.global_position)}
+
+func _cmd_greformer_push_pull(params: Dictionary) -> Variant:
+	var node_path := str(params.get("node_path", ""))
+	var face_idx := int(params.get("face_index", 0))
+	var distance := float(params.get("distance", 1.0))
+	
 	var node := get_node_or_null(node_path)
-	if node == null:
-		return {"status": "error", "error": "Node not found: " + node_path}
-	var sig_list := node.get_signal_list()
-	var result: Array = []
-	for sig in sig_list:
-		var sig_name: String = str(sig.get("name", ""))
-		var args: Array = sig.get("args", [])
-		var conn_list := node.get_signal_connection_list(sig_name)
-		var connections: Array = []
-		for conn in conn_list:
-			var target = conn.get("callable", null)
-			connections.append({
-				"target": str(target.get_object().get_path()) if target and target.get_object() is Node else "Unknown",
-				"method": str(target.get_method()) if target else ""
-			})
-		result.append({
-			"name": sig_name,
-			"args": args,
-			"connections": connections
-		})
-	return {"status": "ok", "data": {"node": node_path, "signals": result}}
+	if not node or not node.has_method("push_pull_selected_face"):
+		return {"status": "error", "error": "GReFormer node not found or invalid: " + node_path}
+		
+	node.set("selected_face_index", face_idx)
+	node.call("push_pull_selected_face", distance)
+	return {"status": "ok", "path": node_path, "face_index": face_idx, "distance": distance}
 
-func _cmd_emit_signal(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("path", ""))
-	var signal_name: String = str(params.get("signal", ""))
-	var args: Array = params.get("args", [])
+func _cmd_greformer_apply_hotspot(params: Dictionary) -> Variant:
+	var node_path := str(params.get("node_path", ""))
+	var face_idx := int(params.get("face_index", 0))
+	var region_name := str(params.get("region_name", "Wood_Plank"))
+	
 	var node := get_node_or_null(node_path)
-	if node == null:
-		return {"status": "error", "error": "Node not found: " + node_path}
-	if not node.has_signal(signal_name):
-		return {"status": "error", "error": "Signal '%s' not found on node '%s'" % [signal_name, node_path]}
-	match args.size():
-		0: node.emit_signal(signal_name)
-		1: node.emit_signal(signal_name, args[0])
-		2: node.emit_signal(signal_name, args[0], args[1])
-		3: node.emit_signal(signal_name, args[0], args[1], args[2])
-		_: node.emit_signal(signal_name, args[0], args[1], args[2], args[3])
-	_add_log("info", "Emitted signal '%s' on %s" % [signal_name, node_path])
-	return {"status": "ok", "data": {"emitted": true, "signal": signal_name, "node": node_path}}
+	if not node:
+		return {"status": "error", "error": "GReFormer node not found: " + node_path}
+		
+	var greformer_mesh = node.get("greformer_mesh")
+	if not greformer_mesh or not greformer_mesh.has_method("apply_hotspot_uv"):
+		return {"status": "error", "error": "GReFormer mesh data uninitialized"}
+		
+	var hotspot_tool_script = load("res://addons/greformer/tools/uv_hotspot_tool.gd")
+	if hotspot_tool_script:
+		var tool_inst = hotspot_tool_script.new()
+		tool_inst.call("apply_region_to_node_face", node, face_idx, region_name)
+		
+	return {"status": "ok", "path": node_path, "face_index": face_idx, "region_name": region_name}
 
-func _cmd_query_ray(params: Dictionary) -> Dictionary:
-	var is_3d: bool = bool(params.get("is_3d", true))
-	var mask: int = int(params.get("collision_mask", 4294967295))
-	var scene := get_tree().current_scene
-	if scene == null:
-		return {"status": "error", "error": "No current scene loaded"}
-	if is_3d:
-		var from_v := _parse_vector3(params.get("from", Vector3.ZERO))
-		var to_v := _parse_vector3(params.get("to", Vector3(0, -10, 0)))
-		var query := PhysicsRayQueryParameters3D.create(from_v, to_v, mask)
-		query.collide_with_areas = bool(params.get("collide_with_areas", true))
-		query.collide_with_bodies = bool(params.get("collide_with_bodies", true))
-		var space_state := (scene.get_world_3d() if scene is Node3D else get_viewport().find_world_3d()).direct_space_state
-		var hit := space_state.intersect_ray(query)
-		if hit.is_empty():
-			return {"status": "ok", "data": {"hit": false}}
-		var collider = hit.get("collider", null)
-		return {"status": "ok", "data": {
-			"hit": true,
-			"position": _serialize(hit.get("position")),
-			"normal": _serialize(hit.get("normal")),
-			"collider_name": str(collider.name) if collider else "",
-			"collider_path": str(collider.get_path()) if collider is Node else "",
-			"distance": from_v.distance_to(hit.get("position", from_v))
-		}}
-	else:
-		var from_v2 := _parse_vector2(params.get("from", Vector2.ZERO))
-		var to_v2 := _parse_vector2(params.get("to", Vector2(100, 100)))
-		var query2d := PhysicsRayQueryParameters2D.create(from_v2, to_v2, mask)
-		var space_state2d := (scene.get_world_2d() if scene is CanvasItem else get_viewport().find_world_2d()).direct_space_state
-		var hit2d := space_state2d.intersect_ray(query2d)
-		if hit2d.is_empty():
-			return {"status": "ok", "data": {"hit": false}}
-		var collider2d = hit2d.get("collider", null)
-		return {"status": "ok", "data": {
-			"hit": true,
-			"position": _serialize(hit2d.get("position")),
-			"normal": _serialize(hit2d.get("normal")),
-			"collider_name": str(collider2d.name) if collider2d else "",
-			"collider_path": str(collider2d.get_path()) if collider2d is Node else ""
-		}}
-
-func _cmd_query_point(params: Dictionary) -> Dictionary:
-	var is_3d: bool = bool(params.get("is_3d", true))
-	var scene := get_tree().current_scene
-	if scene == null:
-		return {"status": "error", "error": "No current scene loaded"}
-	if is_3d:
-		var point3d := _parse_vector3(params.get("point", Vector3.ZERO))
-		var query := PhysicsPointQueryParameters3D.new()
-		query.position = point3d
-		var space_state := (scene.get_world_3d() if scene is Node3D else get_viewport().find_world_3d()).direct_space_state
-		var hits := space_state.intersect_point(query)
-		var results: Array = []
-		for h in hits:
-			var col = h.get("collider", null)
-			results.append({
-				"collider_name": str(col.name) if col else "",
-				"collider_path": str(col.get_path()) if col is Node else ""
-			})
-		return {"status": "ok", "data": {"count": results.size(), "hits": results}}
-	else:
-		var point2d := _parse_vector2(params.get("point", Vector2.ZERO))
-		var query2d := PhysicsPointQueryParameters2D.new()
-		query2d.position = point2d
-		var space_state2d := (scene.get_world_2d() if scene is CanvasItem else get_viewport().find_world_2d()).direct_space_state
-		var hits2d := space_state2d.intersect_point(query2d)
-		var results2d: Array = []
-		for h in hits2d:
-			var col = h.get("collider", null)
-			results2d.append({
-				"collider_name": str(col.name) if col else "",
-				"collider_path": str(col.get_path()) if col is Node else ""
-			})
-		return {"status": "ok", "data": {"count": results2d.size(), "hits": results2d}}
-
-func _cmd_action_press(params: Dictionary) -> Dictionary:
-	var action: String = str(params.get("action", ""))
-	var strength: float = float(params.get("strength", 1.0))
-	if not InputMap.has_action(action):
-		return {"status": "error", "error": "Action '%s' is not defined in InputMap" % action}
-	Input.action_press(action, strength)
-	_add_log("info", "Pressed action '%s' (strength: %.2f)" % [action, strength])
-	return {"status": "ok", "data": {"action": action, "pressed": true}}
-
-func _cmd_action_release(params: Dictionary) -> Dictionary:
-	var action: String = str(params.get("action", ""))
-	if not InputMap.has_action(action):
-		return {"status": "error", "error": "Action '%s' is not defined in InputMap" % action}
-	Input.action_release(action)
-	_add_log("info", "Released action '%s'" % action)
-	return {"status": "ok", "data": {"action": action, "released": true}}
-
-func _cmd_metrics(params: Dictionary) -> Dictionary:
-	var perf := Performance
-	return {"status": "ok", "data": {
-		"fps": perf.get_monitor(perf.TIME_FPS),
-		"process_time_ms": perf.get_monitor(perf.TIME_PROCESS) * 1000.0,
-		"physics_time_ms": perf.get_monitor(perf.TIME_PHYSICS_PROCESS) * 1000.0,
-		"draw_calls": perf.get_monitor(perf.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
-		"primitives": perf.get_monitor(perf.RENDER_TOTAL_PRIMITIVES_IN_FRAME),
-		"video_mem_bytes": perf.get_monitor(perf.RENDER_VIDEO_MEM_USED),
-		"node_count": perf.get_monitor(perf.OBJECT_NODE_COUNT),
-		"orphan_node_count": perf.get_monitor(perf.OBJECT_ORPHAN_NODE_COUNT),
-		"active_objects_3d": perf.get_monitor(perf.PHYSICS_3D_ACTIVE_OBJECTS),
-		"active_objects_2d": perf.get_monitor(perf.PHYSICS_2D_ACTIVE_OBJECTS)
-	}}
-
-func _cmd_highlight_node(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("path", ""))
-	var duration: float = float(params.get("duration", 2.0))
+func _cmd_greformer_bake(params: Dictionary) -> Variant:
+	var node_path := str(params.get("node_path", ""))
 	var node := get_node_or_null(node_path)
-	if node == null:
-		return {"status": "error", "error": "Node not found: " + node_path}
-	_add_log("info", "Highlighting node %s for %.1fs" % [node_path, duration])
-	return {"status": "ok", "data": {"highlighted": true, "node": node_path, "duration": duration}}
+	if not node or not node.has_method("bake_mesh_to_static"):
+		return {"status": "error", "error": "GReFormer node not found or invalid: " + node_path}
+		
+	var baked: Node3D = node.call("bake_mesh_to_static")
+	if not baked:
+		return {"status": "error", "error": "Failed to bake GReFormer mesh"}
+		
+	return {"status": "ok", "baked_path": str(baked.get_path()), "baked_name": str(baked.name)}
+
+func _cmd_greformer_export_obj(params: Dictionary) -> Variant:
+	var node_path := str(params.get("node_path", ""))
+	var output_path := str(params.get("output_path", "res://exported_mesh.obj"))
+	
+	var node := get_node_or_null(node_path) as GReFormerNode3D
+	if not node:
+		return {"status": "error", "error": "GReFormer node not found: " + node_path}
+		
+	var exporter_script = load("res://addons/greformer/tools/obj_exporter.gd")
+	if exporter_script:
+		var err: Error = exporter_script.call("export_to_obj", node, output_path)
+		if err == OK:
+			return {"status": "ok", "path": node_path, "output_path": output_path}
+			
+	return {"status": "error", "error": "Failed to export OBJ"}
+
+func _cmd_greformer_create_preset(params: Dictionary) -> Variant:
+	var preset_name := str(params.get("preset", "Wall"))
+	var obj_name := str(params.get("name", "GReFormer_Preset"))
+	var pos := _parse_vector3(params.get("position", Vector3.ZERO))
+	
+	var library_script = load("res://addons/greformer/tools/blockout_library.gd")
+	var greformer_script = load("res://addons/greformer/core/greformer_node.gd")
+	if not library_script or not greformer_script:
+		return {"status": "error", "error": "GReFormer preset library scripts not loaded"}
+		
+	var ptype := 0 # WALL
+	if preset_name.findn("ramp") != -1: ptype = 1
+	elif preset_name.findn("pillar") != -1: ptype = 2
+	elif preset_name.findn("arch") != -1: ptype = 3
+	elif preset_name.findn("door") != -1: ptype = 4
+	
+	var mesh_res: ArrayMesh = library_script.call("create_preset_mesh", ptype)
+	var edited_root := get_tree().edited_scene_root if get_tree().edited_scene_root else get_tree().root
+	
+	var node: Node3D = Node3D.new()
+	node.set_script(greformer_script)
+	node.name = obj_name
+	edited_root.add_child(node)
+	if get_tree().edited_scene_root:
+		node.owner = get_tree().edited_scene_root
+		
+	node.global_position = pos
+	node.mesh = mesh_res
+	var gmesh = node.get("greformer_mesh")
+	if gmesh:
+		gmesh.call("load_from_array_mesh", mesh_res)
+		
+	return {"status": "ok", "name": str(node.name), "path": str(node.get_path()), "preset": preset_name}
 
 func _parse_vector3(val: Variant) -> Vector3:
-	if val is Vector3: return val
+	if val is Vector3:
+		return val
 	if val is Dictionary:
-		return Vector3(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("z", 0)))
+		var d := val as Dictionary
+		return Vector3(float(d.get("x", 0)), float(d.get("y", 0)), float(d.get("z", 0)))
+	if val is Array and (val as Array).size() >= 3:
+		var a := val as Array
+		return Vector3(float(a[0]), float(a[1]), float(a[2]))
 	if val is String:
-		var expr := Expression.new()
-		if expr.parse(val) == OK:
-			var res = expr.execute([], self)
-			if res is Vector3: return res
+		var parts := (val as String).split(",")
+		if parts.size() >= 3:
+			return Vector3(parts[0].to_float(), parts[1].to_float(), parts[2].to_float())
 	return Vector3.ZERO
-
-func _parse_vector2(val: Variant) -> Vector2:
-	if val is Vector2: return val
-	if val is Dictionary:
-		return Vector2(float(val.get("x", 0)), float(val.get("y", 0)))
-	if val is String:
-		var expr := Expression.new()
-		if expr.parse(val) == OK:
-			var res = expr.execute([], self)
-			if res is Vector2: return res
-	return Vector2.ZERO
-
-
-func _cmd_find_nodes(params: Dictionary) -> Dictionary:
-	var root_path: String = str(params.get("root", ""))
-	var root_node: Node = get_node_or_null(root_path) if not root_path.is_empty() else get_tree().current_scene
-	if root_node == null:
-		root_node = get_tree().root
-	var pattern: String = str(params.get("pattern", "")).strip_edges()
-	var type_filter: String = str(params.get("type", "")).strip_edges()
-	var group_filter: String = str(params.get("group", "")).strip_edges()
-
-	var matches: Array = []
-	_search_nodes_recursive(root_node, pattern, type_filter, group_filter, matches)
-	return {"status": "ok", "data": {"count": matches.size(), "nodes": matches}}
-
-func _search_nodes_recursive(node: Node, pattern: String, type_filter: String, group_filter: String, results: Array) -> void:
-	var name_matches := pattern.is_empty() or node.name.match(pattern)
-	var type_matches := type_filter.is_empty() or node.is_class(type_filter)
-	var group_matches := group_filter.is_empty() or node.is_in_group(group_filter)
-
-	if name_matches and type_matches and group_matches:
-		var entry := {
-			"name": str(node.name),
-			"type": node.get_class(),
-			"path": str(node.get_path())
-		}
-		if node is Node2D:
-			entry["position"] = _serialize((node as Node2D).position)
-		elif node is Node3D:
-			entry["position"] = _serialize((node as Node3D).position)
-		results.append(entry)
-
-	for child in node.get_children():
-		_search_nodes_recursive(child, pattern, type_filter, group_filter, results)
-
-
-func _cmd_spawn_3d_object(params: Dictionary) -> Dictionary:
-	var type_name: String = str(params.get("type", "MeshInstance3D"))
-	var obj_name: String = str(params.get("name", "New3DObject"))
-	var parent_path: String = str(params.get("parent_path", ""))
-	var parent_node: Node = get_node_or_null(parent_path) if not parent_path.is_empty() else get_tree().current_scene
-	if parent_node == null: parent_node = get_tree().root
-
-	if not ClassDB.can_instantiate(type_name):
-		return {"status": "error", "error": "Cannot instantiate class: " + type_name}
-
-	var new_obj = ClassDB.instantiate(type_name)
-	if not (new_obj is Node):
-		return {"status": "error", "error": "Instantiated class is not a Node: " + type_name}
-
-	var node_obj := new_obj as Node
-	node_obj.name = obj_name
-	parent_node.add_child(node_obj)
-
-	if node_obj is Node3D:
-		var n3d := node_obj as Node3D
-		if params.has("position"): n3d.position = _parse_vector3(params.get("position"))
-		if params.has("rotation"): n3d.rotation = _parse_vector3(params.get("rotation"))
-		if params.has("scale"): n3d.scale = _parse_vector3(params.get("scale"))
-
-	_add_log("info", "Spawned 3D object '%s' (%s) under %s" % [obj_name, type_name, parent_node.get_path()])
-	return {"status": "ok", "data": {"path": str(node_obj.get_path()), "name": obj_name, "type": type_name}}
-
-func _cmd_transform_3d_node(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("node_path", ""))
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is Node3D):
-		return {"status": "error", "error": "Node3D not found: " + node_path}
-	var n3d := node as Node3D
-	var relative: bool = bool(params.get("relative", false))
-
-	if params.has("position"):
-		var p := _parse_vector3(params.get("position"))
-		n3d.position = n3d.position + p if relative else p
-	if params.has("rotation"):
-		var r := _parse_vector3(params.get("rotation"))
-		n3d.rotation = n3d.rotation + r if relative else r
-	if params.has("scale"):
-		var s := _parse_vector3(params.get("scale"))
-		n3d.scale = n3d.scale * s if relative else s
-
-	return {"status": "ok", "data": {
-		"path": node_path,
-		"position": _serialize(n3d.position),
-		"rotation": _serialize(n3d.rotation),
-		"scale": _serialize(n3d.scale)
-	}}
-
-func _cmd_inspect_level_layout(params: Dictionary) -> Dictionary:
-	var center := _parse_vector3(params.get("center_position", Vector3.ZERO))
-	var radius: float = float(params.get("radius", 20.0))
-	var root_path: String = str(params.get("node_path", ""))
-	var root_node: Node = get_node_or_null(root_path) if not root_path.is_empty() else get_tree().current_scene
-	if root_node == null: root_node = get_tree().root
-
-	var nearby: Array = []
-	_collect_nearby_3d(root_node, center, radius, nearby)
-	return {"status": "ok", "data": {"center": _serialize(center), "radius": radius, "count": nearby.size(), "objects": nearby}}
-
-func _collect_nearby_3d(node: Node, center: Vector3, radius: float, results: Array) -> void:
-	if node is Node3D:
-		var pos: Vector2 = Vector2.ZERO
-		var pos3d := (node as Node3D).global_position
-		var dist := center.distance_to(pos3d)
-		if dist <= radius:
-			results.append({
-				"name": str(node.name),
-				"type": node.get_class(),
-				"path": str(node.get_path()),
-				"position": _serialize(pos3d),
-				"distance": dist
-			})
-	for child in node.get_children():
-		_collect_nearby_3d(child, center, radius, results)
-
-func _cmd_duplicate_3d_node(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("node_path", ""))
-	var node := get_node_or_null(node_path)
-	if node == null:
-		return {"status": "error", "error": "Node not found: " + node_path}
-	var clone := node.duplicate()
-	if params.has("new_name"): clone.name = str(params.get("new_name"))
-	node.get_parent().add_child(clone)
-	if clone is Node3D and params.has("offset_position"):
-		var n3d := clone as Node3D
-		n3d.position += _parse_vector3(params.get("offset_position"))
-	return {"status": "ok", "data": {"cloned_path": str(clone.get_path()), "name": str(clone.name)}}
-
-func _cmd_greformer_create(params: Dictionary) -> Dictionary:
-	var prim_type: String = str(params.get("primitive_type", "Box"))
-	var obj_name: String = str(params.get("name", "GReFormer_Object"))
-	var pos := _parse_vector3(params.get("position", Vector3.ZERO))
-
-	var mesh_node := MeshInstance3D.new()
-	mesh_node.name = obj_name
-	var box_mesh := BoxMesh.new()
-	box_mesh.size = Vector3(2, 2, 2)
-	mesh_node.mesh = box_mesh
-	mesh_node.position = pos
-
-	var root := get_tree().current_scene if get_tree().current_scene else get_tree().root
-	root.add_child(mesh_node)
-
-	_add_log("info", "Created GReFormer Primitive (%s) at %s" % [prim_type, pos])
-	return {"status": "ok", "data": {"path": str(mesh_node.get_path()), "primitive": prim_type, "position": _serialize(pos)}}
-
-func _cmd_greformer_push_pull(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("node_path", ""))
-	var face_index: int = int(params.get("face_index", 0))
-	var distance: float = float(params.get("distance", 1.0))
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is MeshInstance3D):
-		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-
-	var mesh_inst := node as MeshInstance3D
-	mesh_inst.scale += Vector3(0, distance * 0.1, 0)
-	_add_log("info", "Pushed/Pulled face %d by %.2f on %s" % [face_index, distance, node_path])
-	return {"status": "ok", "data": {"node": node_path, "face": face_index, "extruded_distance": distance}}
-
-func _cmd_greformer_apply_hotspot(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("node_path", ""))
-	var region_name: String = str(params.get("region_name", "Wood_Plank"))
-	var face_index: int = int(params.get("face_index", 0))
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is MeshInstance3D):
-		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-
-	_add_log("info", "Applied Hotspot Region '%s' to face %d on %s" % [region_name, face_index, node_path])
-	return {"status": "ok", "data": {"node": node_path, "hotspot_region": region_name, "face": face_index}}
-
-func _cmd_greformer_bake(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("node_path", ""))
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is MeshInstance3D):
-		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-	var mesh_inst := node as MeshInstance3D
-	mesh_inst.create_trimesh_collision()
-	_add_log("info", "Baked GReFormer mesh and generated trimesh collision for %s" % node_path)
-	return {"status": "ok", "data": {"node": node_path, "baked": true, "collision_generated": true}}
-
-func _cmd_query_path_3d(params: Dictionary) -> Dictionary:
-	var start := _parse_vector3(params.get("from", Vector3.ZERO))
-	var end := _parse_vector3(params.get("to", Vector3.ZERO))
-	var scene := get_tree().current_scene
-	var map_rid := (scene.get_world_3d() if scene is Node3D else get_viewport().find_world_3d()).navigation_map
-	var path_pts := NavigationServer3D.map_get_path(map_rid, start, end, true)
-	var serialized_pts: Array = []
-	var total_length := 0.0
-	for i in range(path_pts.size()):
-		serialized_pts.append(_serialize(path_pts[i]))
-		if i > 0: total_length += path_pts[i-1].distance_to(path_pts[i])
-	return {"status": "ok", "data": {
-		"from": _serialize(start),
-		"to": _serialize(end),
-		"path_points": serialized_pts,
-		"point_count": serialized_pts.size(),
-		"length": total_length,
-		"reachable": serialized_pts.size() > 0
-	}}
-
-func _cmd_set_shader_param(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("path", ""))
-	var param_name: String = str(params.get("param", ""))
-	var val = params.get("value")
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is GeometryInstance3D):
-		return {"status": "error", "error": "GeometryInstance3D not found: " + node_path}
-	var mat := (node as GeometryInstance3D).material_override
-	if mat == null:
-		return {"status": "error", "error": "Node has no material_override set"}
-	if mat is ShaderMaterial:
-		(mat as ShaderMaterial).set_shader_parameter(param_name, _deserialize(val))
-		return {"status": "ok", "data": {"path": node_path, "param": param_name, "value": val}}
-	return {"status": "error", "error": "material_override is not a ShaderMaterial"}
-
-func _cmd_play_animation(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("path", ""))
-	var anim_name: String = str(params.get("animation", ""))
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is AnimationPlayer):
-		return {"status": "error", "error": "AnimationPlayer not found: " + node_path}
-	var anim_player := node as AnimationPlayer
-	if not anim_player.has_animation(anim_name):
-		return {"status": "error", "error": "Animation '%s' not found" % anim_name}
-	anim_player.play(anim_name)
-	return {"status": "ok", "data": {"path": node_path, "animation": anim_name, "playing": true}}
-
-func _cmd_capture_sequence(params: Dictionary) -> Dictionary:
-	var count: int = clampi(int(params.get("count", 5)), 1, 30)
-	var frames: Array = []
-	for i in range(count):
-		var img := get_viewport().get_texture().get_image()
-		if img != null:
-			var base64 := Marshalls.raw_to_base64(img.save_png_to_buffer())
-			frames.append({"frame": i, "base64_png": base64, "width": img.get_width(), "height": img.get_height()})
-	return {"status": "ok", "data": {"frame_count": frames.size(), "frames": frames}}
-
-func _cmd_export_project_api(_params: Dictionary) -> Dictionary:
-	var root := get_tree().current_scene if get_tree().current_scene else get_tree().root
-	var script_map: Dictionary = {}
-	_scan_scripts_recursive(root, script_map)
-	return {"status": "ok", "data": {"scripts": script_map, "count": script_map.size()}}
-
-func _scan_scripts_recursive(node: Node, map: Dictionary) -> void:
-	var script = node.get_script()
-	if script is Script and script.resource_path.begins_with("res://"):
-		var path_str := script.resource_path
-		if not map.has(path_str):
-			var props: Array = []
-			for p in script.get_script_property_list():
-				props.append({"name": str(p.name), "type": int(p.type)})
-			var methods: Array = []
-			for m in script.get_script_method_list():
-				methods.append({"name": str(m.name)})
-			var sigs: Array = []
-			for s in script.get_script_signal_list():
-				sigs.append({"name": str(s.name)})
-			map[path_str] = {
-				"class_name": str(script.get_global_name()) if script.has_method("get_global_name") else "",
-				"path": path_str,
-				"properties": props,
-				"methods": methods,
-				"signals": sigs
-			}
-	for child in node.get_children():
-		_scan_scripts_recursive(child, map)
-
-
-
-
