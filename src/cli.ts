@@ -647,6 +647,86 @@ program
     }
   });
 
+program
+  .command("get-logs")
+  .description("Retrieve GDScript runtime logs, errors, and warnings")
+  .option("--level <level>", "Filter level (info, warning, error)")
+  .option("--clear", "Clear log buffer after fetching")
+  .action(async (opts: { level?: string; clear?: boolean }) => {
+    await run("get_logs", { level: opts.level, clear: opts.clear });
+  });
+
+program
+  .command("list-signals")
+  .description("List all signals of a node and connected target callables")
+  .argument("<path>", "Node path")
+  .action(async (nodePath: string) => {
+    await run("list_signals", { path: nodePath });
+  });
+
+program
+  .command("emit-signal")
+  .description("Emit a GDScript signal on a node")
+  .argument("<path>", "Node path")
+  .argument("<signal>", "Signal name")
+  .argument("[args...]", "Signal arguments")
+  .action(async (nodePath: string, signalName: string, args: string[]) => {
+    const parsedArgs = (args || []).map(parseValue);
+    await run("emit_signal", { path: nodePath, signal: signalName, args: parsedArgs });
+  });
+
+program
+  .command("query-ray")
+  .description("Perform a 3D or 2D physics raycast query in the world space state")
+  .option("--from <vector>", "Start position (e.g. Vector3(0,10,0))", "Vector3(0,10,0)")
+  .option("--to <vector>", "End position (e.g. Vector3(0,0,0))", "Vector3(0,0,0)")
+  .option("--2d", "Perform 2D raycast instead of 3D")
+  .action(async (opts: { from: string; to: string; "2d"?: boolean }) => {
+    await run("query_ray", { is_3d: !opts["2d"], from: opts.from, to: opts.to });
+  });
+
+program
+  .command("query-point")
+  .description("Query physics colliders at a specific 3D or 2D point")
+  .argument("<point>", "Point position (e.g. Vector3(0,0,0) or Vector2(100,100))")
+  .option("--2d", "Perform 2D point query instead of 3D")
+  .action(async (pointStr: string, opts: { "2d"?: boolean }) => {
+    await run("query_point", { is_3d: !opts["2d"], point: pointStr });
+  });
+
+program
+  .command("action-press")
+  .description("Simulate pressing an InputMap action (e.g. ui_accept, move_forward)")
+  .argument("<action>", "Action name")
+  .option("--strength <strength>", "Action strength (0.0 to 1.0)", "1.0")
+  .action(async (actionName: string, opts: { strength: string }) => {
+    await run("action_press", { action: actionName, strength: parseFloat(opts.strength) });
+  });
+
+program
+  .command("action-release")
+  .description("Simulate releasing an InputMap action")
+  .argument("<action>", "Action name")
+  .action(async (actionName: string) => {
+    await run("action_release", { action: actionName });
+  });
+
+program
+  .command("metrics")
+  .description("Get detailed engine performance monitors (FPS, process/physics ms, draw calls, video memory)")
+  .action(async () => {
+    await run("metrics");
+  });
+
+program
+  .command("highlight-node")
+  .description("Temporarily highlight a node in the viewport")
+  .argument("<path>", "Node path")
+  .option("--duration <seconds>", "Duration in seconds", "2.0")
+  .action(async (nodePath: string, opts: { duration: string }) => {
+    await run("highlight_node", { path: nodePath, duration: parseFloat(opts.duration) });
+  });
+
 // ---------------------------------------------------------------------------
 
 program.action(async () => {

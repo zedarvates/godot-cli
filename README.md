@@ -121,6 +121,51 @@ p.position = Vector2(100, 200)
 return p.position"
 ```
 
+### Signals & Events
+
+```bash
+# List all signals of a node and target listeners
+godot-cli list-signals /root/Main/Player
+
+# Emit a signal programmatically
+godot-cli emit-signal /root/Main/Player health_changed 75
+```
+
+### Physics & Spatial Queries
+
+```bash
+# Perform a 3D raycast query in world physics space
+godot-cli query-ray --from "Vector3(0,10,0)" --to "Vector3(0,0,0)"
+
+# Perform a 2D raycast query
+godot-cli query-ray --from "Vector2(0,0)" --to "Vector2(500,500)" --2d
+
+# Query physics colliders at a point
+godot-cli query-point "Vector3(0, 1, 0)"
+```
+
+### Input Map Actions
+
+```bash
+# Trigger InputMap action (e.g. ui_accept, move_forward)
+godot-cli action-press ui_accept --strength 1.0
+godot-cli action-release ui_accept
+```
+
+### Runtime Logs & Diagnostics
+
+```bash
+# Retrieve GDScript runtime logs, errors, and warnings
+godot-cli get-logs --level error
+godot-cli get-logs --clear
+
+# Detailed engine performance & render metrics
+godot-cli metrics
+
+# Highlight a node in the viewport for visual screenshots
+godot-cli highlight-node /root/Main/Player --duration 3.0
+```
+
 ### Input simulation
 
 ```bash

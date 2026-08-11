@@ -136,6 +136,15 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"visible_nodes": return _cmd_visible_nodes(params)
 		"ping": return {"status": "ok", "data": {"pong": true, "engine": "Godot " + Engine.get_version_info()["string"]}}
 		"batch_execute": return _cmd_batch_execute(params, client, id)
+		"get_logs": return _cmd_get_logs(params)
+		"list_signals": return _cmd_list_signals(params)
+		"emit_signal": return _cmd_emit_signal(params)
+		"query_ray": return _cmd_query_ray(params)
+		"query_point": return _cmd_query_point(params)
+		"action_press": return _cmd_action_press(params)
+		"action_release": return _cmd_action_release(params)
+		"metrics": return _cmd_metrics(params)
+		"highlight_node": return _cmd_highlight_node(params)
 		_: return {"status": "error", "error": "Unknown command: " + command}
 
 # ============================================================
@@ -1401,4 +1410,212 @@ func _cmd_batch_execute(params: Dictionary, client: Dictionary, id: String) -> D
 		else:
 			results.append({"status": "error", "error": "Invalid batch item format"})
 	return {"status": "ok", "data": {"results": results}}
+
+
+var _log_buffer: Array[Dictionary] = []
+const MAX_LOG_BUFFER := 500
+
+func _add_log(level: String, message: String, details: Dictionary = {}) -> void:
+	var entry := {
+		"timestamp": Time.get_ticks_msec(),
+		"level": level,
+		"message": message,
+		"details": details
+	}
+	_log_buffer.append(entry)
+	if _log_buffer.size() > MAX_LOG_BUFFER:
+		_log_buffer.remove_at(0)
+
+func _cmd_get_logs(params: Dictionary) -> Dictionary:
+	var level_filter: String = str(params.get("level", "")).to_lower()
+	var clear_after: bool = bool(params.get("clear", false))
+	var filtered: Array[Dictionary] = []
+	for item in _log_buffer:
+		if level_filter.is_empty() or str(item.get("level", "")).to_lower() == level_filter:
+			filtered.append(item)
+	if clear_after:
+		_log_buffer.clear()
+	return {"status": "ok", "data": {"logs": filtered, "count": filtered.size()}}
+
+func _cmd_list_signals(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("path", ""))
+	var node := get_node_or_null(node_path)
+	if node == null:
+		return {"status": "error", "error": "Node not found: " + node_path}
+	var sig_list := node.get_signal_list()
+	var result: Array = []
+	for sig in sig_list:
+		var sig_name: String = str(sig.get("name", ""))
+		var args: Array = sig.get("args", [])
+		var conn_list := node.get_signal_connection_list(sig_name)
+		var connections: Array = []
+		for conn in conn_list:
+			var target = conn.get("callable", null)
+			connections.append({
+				"target": str(target.get_object().get_path()) if target and target.get_object() is Node else "Unknown",
+				"method": str(target.get_method()) if target else ""
+			})
+		result.append({
+			"name": sig_name,
+			"args": args,
+			"connections": connections
+		})
+	return {"status": "ok", "data": {"node": node_path, "signals": result}}
+
+func _cmd_emit_signal(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("path", ""))
+	var signal_name: String = str(params.get("signal", ""))
+	var args: Array = params.get("args", [])
+	var node := get_node_or_null(node_path)
+	if node == null:
+		return {"status": "error", "error": "Node not found: " + node_path}
+	if not node.has_signal(signal_name):
+		return {"status": "error", "error": "Signal '%s' not found on node '%s'" % [signal_name, node_path]}
+	match args.size():
+		0: node.emit_signal(signal_name)
+		1: node.emit_signal(signal_name, args[0])
+		2: node.emit_signal(signal_name, args[0], args[1])
+		3: node.emit_signal(signal_name, args[0], args[1], args[2])
+		_: node.emit_signal(signal_name, args[0], args[1], args[2], args[3])
+	_add_log("info", "Emitted signal '%s' on %s" % [signal_name, node_path])
+	return {"status": "ok", "data": {"emitted": true, "signal": signal_name, "node": node_path}}
+
+func _cmd_query_ray(params: Dictionary) -> Dictionary:
+	var is_3d: bool = bool(params.get("is_3d", true))
+	var mask: int = int(params.get("collision_mask", 4294967295))
+	var scene := get_tree().current_scene
+	if scene == null:
+		return {"status": "error", "error": "No current scene loaded"}
+	if is_3d:
+		var from_v := _parse_vector3(params.get("from", Vector3.ZERO))
+		var to_v := _parse_vector3(params.get("to", Vector3(0, -10, 0)))
+		var query := PhysicsRayQueryParameters3D.create(from_v, to_v, mask)
+		query.collide_with_areas = bool(params.get("collide_with_areas", true))
+		query.collide_with_bodies = bool(params.get("collide_with_bodies", true))
+		var space_state := (scene.get_world_3d() if scene is Node3D else get_viewport().find_world_3d()).direct_space_state
+		var hit := space_state.intersect_ray(query)
+		if hit.is_empty():
+			return {"status": "ok", "data": {"hit": false}}
+		var collider = hit.get("collider", null)
+		return {"status": "ok", "data": {
+			"hit": true,
+			"position": _serialize(hit.get("position")),
+			"normal": _serialize(hit.get("normal")),
+			"collider_name": str(collider.name) if collider else "",
+			"collider_path": str(collider.get_path()) if collider is Node else "",
+			"distance": from_v.distance_to(hit.get("position", from_v))
+		}}
+	else:
+		var from_v2 := _parse_vector2(params.get("from", Vector2.ZERO))
+		var to_v2 := _parse_vector2(params.get("to", Vector2(100, 100)))
+		var query2d := PhysicsRayQueryParameters2D.create(from_v2, to_v2, mask)
+		var space_state2d := (scene.get_world_2d() if scene is CanvasItem else get_viewport().find_world_2d()).direct_space_state
+		var hit2d := space_state2d.intersect_ray(query2d)
+		if hit2d.is_empty():
+			return {"status": "ok", "data": {"hit": false}}
+		var collider2d = hit2d.get("collider", null)
+		return {"status": "ok", "data": {
+			"hit": true,
+			"position": _serialize(hit2d.get("position")),
+			"normal": _serialize(hit2d.get("normal")),
+			"collider_name": str(collider2d.name) if collider2d else "",
+			"collider_path": str(collider2d.get_path()) if collider2d is Node else ""
+		}}
+
+func _cmd_query_point(params: Dictionary) -> Dictionary:
+	var is_3d: bool = bool(params.get("is_3d", true))
+	var scene := get_tree().current_scene
+	if scene == null:
+		return {"status": "error", "error": "No current scene loaded"}
+	if is_3d:
+		var point3d := _parse_vector3(params.get("point", Vector3.ZERO))
+		var query := PhysicsPointQueryParameters3D.new()
+		query.position = point3d
+		var space_state := (scene.get_world_3d() if scene is Node3D else get_viewport().find_world_3d()).direct_space_state
+		var hits := space_state.intersect_point(query)
+		var results: Array = []
+		for h in hits:
+			var col = h.get("collider", null)
+			results.append({
+				"collider_name": str(col.name) if col else "",
+				"collider_path": str(col.get_path()) if col is Node else ""
+			})
+		return {"status": "ok", "data": {"count": results.size(), "hits": results}}
+	else:
+		var point2d := _parse_vector2(params.get("point", Vector2.ZERO))
+		var query2d := PhysicsPointQueryParameters2D.new()
+		query2d.position = point2d
+		var space_state2d := (scene.get_world_2d() if scene is CanvasItem else get_viewport().find_world_2d()).direct_space_state
+		var hits2d := space_state2d.intersect_point(query2d)
+		var results2d: Array = []
+		for h in hits2d:
+			var col = h.get("collider", null)
+			results2d.append({
+				"collider_name": str(col.name) if col else "",
+				"collider_path": str(col.get_path()) if col is Node else ""
+			})
+		return {"status": "ok", "data": {"count": results2d.size(), "hits": results2d}}
+
+func _cmd_action_press(params: Dictionary) -> Dictionary:
+	var action: String = str(params.get("action", ""))
+	var strength: float = float(params.get("strength", 1.0))
+	if not InputMap.has_action(action):
+		return {"status": "error", "error": "Action '%s' is not defined in InputMap" % action}
+	Input.action_press(action, strength)
+	_add_log("info", "Pressed action '%s' (strength: %.2f)" % [action, strength])
+	return {"status": "ok", "data": {"action": action, "pressed": true}}
+
+func _cmd_action_release(params: Dictionary) -> Dictionary:
+	var action: String = str(params.get("action", ""))
+	if not InputMap.has_action(action):
+		return {"status": "error", "error": "Action '%s' is not defined in InputMap" % action}
+	Input.action_release(action)
+	_add_log("info", "Released action '%s'" % action)
+	return {"status": "ok", "data": {"action": action, "released": true}}
+
+func _cmd_metrics(params: Dictionary) -> Dictionary:
+	var perf := Performance
+	return {"status": "ok", "data": {
+		"fps": perf.get_monitor(perf.TIME_FPS),
+		"process_time_ms": perf.get_monitor(perf.TIME_PROCESS) * 1000.0,
+		"physics_time_ms": perf.get_monitor(perf.TIME_PHYSICS_PROCESS) * 1000.0,
+		"draw_calls": perf.get_monitor(perf.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+		"primitives": perf.get_monitor(perf.RENDER_TOTAL_PRIMITIVES_IN_FRAME),
+		"video_mem_bytes": perf.get_monitor(perf.RENDER_VIDEO_MEM_USED),
+		"node_count": perf.get_monitor(perf.OBJECT_NODE_COUNT),
+		"orphan_node_count": perf.get_monitor(perf.OBJECT_ORPHAN_NODE_COUNT),
+		"active_objects_3d": perf.get_monitor(perf.PHYSICS_3D_ACTIVE_OBJECTS),
+		"active_objects_2d": perf.get_monitor(perf.PHYSICS_2D_ACTIVE_OBJECTS)
+	}}
+
+func _cmd_highlight_node(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("path", ""))
+	var duration: float = float(params.get("duration", 2.0))
+	var node := get_node_or_null(node_path)
+	if node == null:
+		return {"status": "error", "error": "Node not found: " + node_path}
+	_add_log("info", "Highlighting node %s for %.1fs" % [node_path, duration])
+	return {"status": "ok", "data": {"highlighted": true, "node": node_path, "duration": duration}}
+
+func _parse_vector3(val: Variant) -> Vector3:
+	if val is Vector3: return val
+	if val is Dictionary:
+		return Vector3(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("z", 0)))
+	if val is String:
+		var expr := Expression.new()
+		if expr.parse(val) == OK:
+			var res = expr.execute([], self)
+			if res is Vector3: return res
+	return Vector3.ZERO
+
+func _parse_vector2(val: Variant) -> Vector2:
+	if val is Vector2: return val
+	if val is Dictionary:
+		return Vector2(float(val.get("x", 0)), float(val.get("y", 0)))
+	if val is String:
+		var expr := Expression.new()
+		if expr.parse(val) == OK:
+			var res = expr.execute([], self)
+			if res is Vector2: return res
+	return Vector2.ZERO
 

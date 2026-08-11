@@ -105,6 +105,105 @@ export async function runMcpServer(options: { host?: string; port?: string | num
       description: "Get engine viewport performance info (FPS, draw calls, memory, node count).",
       inputSchema: { type: "object", properties: {} },
     },
+    {
+      name: "godot_get_logs",
+      description: "Retrieve GDScript runtime logs, errors, and warnings.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          level: { type: "string", description: "Filter by level: info, warning, error" },
+          clear: { type: "boolean", description: "Clear log buffer after fetching" },
+        },
+      },
+    },
+    {
+      name: "godot_list_signals",
+      description: "List all signals of a node, their parameters, and connected target callables.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Node path (e.g. /root/Main/Player)" },
+        },
+        required: ["path"],
+      },
+    },
+    {
+      name: "godot_emit_signal",
+      description: "Emit a GDScript signal on a node programmatically.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Node path" },
+          signal: { type: "string", description: "Signal name" },
+          args: { type: "array", description: "Arguments for the signal" },
+        },
+        required: ["path", "signal"],
+      },
+    },
+    {
+      name: "godot_query_ray",
+      description: "Perform 3D or 2D physics raycast query in the world space state.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          is_3d: { type: "boolean", description: "True for 3D physics raycast, false for 2D" },
+          from: { description: "Ray start position string expression or Vector dict (e.g. Vector3(0,10,0))" },
+          to: { description: "Ray end position string expression or Vector dict (e.g. Vector3(0,0,0))" },
+          collision_mask: { type: "number", description: "Physics collision layer mask" },
+        },
+      },
+    },
+    {
+      name: "godot_query_point",
+      description: "Query physics colliders at a specific 3D or 2D point.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          is_3d: { type: "boolean", description: "True for 3D point query, false for 2D" },
+          point: { description: "Point position" },
+        },
+      },
+    },
+    {
+      name: "godot_action_press",
+      description: "Simulate pressing an InputMap action (e.g. ui_accept, move_forward).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          action: { type: "string", description: "InputMap action name" },
+          strength: { type: "number", description: "Action strength (0.0 to 1.0, default 1.0)" },
+        },
+        required: ["action"],
+      },
+    },
+    {
+      name: "godot_action_release",
+      description: "Simulate releasing an InputMap action.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          action: { type: "string", description: "InputMap action name" },
+        },
+        required: ["action"],
+      },
+    },
+    {
+      name: "godot_metrics",
+      description: "Get detailed engine performance monitors (FPS, process/physics ms, draw calls, video memory, active 3D/2D objects).",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "godot_highlight_node",
+      description: "Temporarily highlight a node in the viewport for visual inspection and screenshots.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Node path" },
+          duration: { type: "number", description: "Duration in seconds (default 2.0)" },
+        },
+        required: ["path"],
+      },
+    },
   ];
 
   const rl = readline.createInterface({
@@ -123,7 +222,7 @@ export async function runMcpServer(options: { host?: string; port?: string | num
         sendResponse(id, {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "godot-cli-mcp", version: "0.2.0" },
+          serverInfo: { name: "godot-cli-mcp", version: "0.3.0" },
         });
       } else if (method === "tools/list") {
         sendResponse(id, { tools });
@@ -144,6 +243,15 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_screenshot": commandName = "screenshot"; break;
           case "godot_batch_execute": commandName = "batch_execute"; break;
           case "godot_viewport_info": commandName = "viewport_info"; break;
+          case "godot_get_logs": commandName = "get_logs"; break;
+          case "godot_list_signals": commandName = "list_signals"; break;
+          case "godot_emit_signal": commandName = "emit_signal"; break;
+          case "godot_query_ray": commandName = "query_ray"; break;
+          case "godot_query_point": commandName = "query_point"; break;
+          case "godot_action_press": commandName = "action_press"; break;
+          case "godot_action_release": commandName = "action_release"; break;
+          case "godot_metrics": commandName = "metrics"; break;
+          case "godot_highlight_node": commandName = "highlight_node"; break;
           default:
             sendError(id, -32601, `Unknown tool: ${toolName}`);
             return;
