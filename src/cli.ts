@@ -5,6 +5,7 @@ import { GodotClient, type GodotResponse } from "./client.js";
 import { runMcpServer } from "./mcp.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as readline from "node:readline";
 
 const program = new Command();
 
@@ -356,9 +357,10 @@ program
 
 program
   .command("screenshot")
-  .description("Capture a screenshot of the game viewport")
+  .description("Capture the game viewport to PNG file or Base64 string")
   .option("--output <path>", "Output file path", "screenshot.png")
-  .action(async (opts: { output: string }) => {
+  .option("--base64", "Output raw base64 JSON response instead of saving file")
+  .action(async (opts: { output: string; base64?: boolean }) => {
     const gopts = program.opts();
     const client = new GodotClient({ host: gopts.host, port: gopts.port });
     try {
@@ -372,6 +374,10 @@ program
         width: number;
         height: number;
       };
+      if (opts.base64) {
+        process.stdout.write(JSON.stringify(response, null, 2) + "\n");
+        return;
+      }
       const buffer = Buffer.from(data.base64_png, "base64");
       const outputPath = path.resolve(opts.output);
       fs.writeFileSync(outputPath, buffer);
@@ -760,6 +766,46 @@ program
       process.stderr.write(`Replay Error: ${msg}\n`);
       process.exit(1);
     }
+  });
+
+program
+  .command("repl")
+  .description("Interactive REPL shell connected to running Godot game")
+  .action(async () => {
+    const opts = program.opts();
+    const client = new GodotClient({ host: opts.host, port: opts.port });
+    process.stdout.write(`godot-cli REPL (connected to ${opts.host}:${opts.port})\nType 'exit' to quit.\n\n`);
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      prompt: "godot> ",
+    });
+
+    rl.prompt();
+
+    rl.on("line", async (line: string) => {
+      const trimmed = line.trim();
+      if (trimmed === "exit" || trimmed === "quit") {
+        rl.close();
+        return;
+      }
+      if (trimmed) {
+        try {
+          let res: GodotResponse;
+          if (["ping", "metrics", "viewport_info", "scene_tree", "get_logs"].includes(trimmed)) {
+            res = await client.send(trimmed);
+          } else {
+            res = await client.send("eval", { code: trimmed });
+          }
+          process.stdout.write(JSON.stringify(res, null, 2) + "\n");
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`REPL Error: ${msg}\n`);
+        }
+      }
+      rl.prompt();
+    });
   });
 
 // ---------------------------------------------------------------------------
