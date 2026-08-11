@@ -204,6 +204,19 @@ export async function runMcpServer(options: { host?: string; port?: string | num
         required: ["path"],
       },
     },
+    {
+      name: "godot_find_nodes",
+      description: "Find nodes matching wildcard pattern, class type, or node group.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "Name wildcard pattern (e.g. *Player* or Enemy*)" },
+          type: { type: "string", description: "Node class name (e.g. CharacterBody3D, Sprite2D)" },
+          group: { type: "string", description: "Node group name" },
+          root: { type: "string", description: "Root node path to start search from" },
+        },
+      },
+    },
   ];
 
   const rl = readline.createInterface({
@@ -252,6 +265,7 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_action_release": commandName = "action_release"; break;
           case "godot_metrics": commandName = "metrics"; break;
           case "godot_highlight_node": commandName = "highlight_node"; break;
+          case "godot_find_nodes": commandName = "find_nodes"; break;
           default:
             sendError(id, -32601, `Unknown tool: ${toolName}`);
             return;

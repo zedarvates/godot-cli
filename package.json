@@ -4,7 +4,8 @@
   "description": "CLI tool for controlling Godot game engine - like Playwright, but for games",
   "type": "module",
   "bin": {
-    "godot-cli": "./dist/src/cli.js"
+    "godot-cli": "./dist/src/cli.js",
+    "godot-cli-mcp": "./dist/src/mcp-cli.js"
   },
   "scripts": {
     "build": "tsc",

@@ -145,6 +145,7 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"action_release": return _cmd_action_release(params)
 		"metrics": return _cmd_metrics(params)
 		"highlight_node": return _cmd_highlight_node(params)
+		"find_nodes": return _cmd_find_nodes(params)
 		_: return {"status": "error", "error": "Unknown command: " + command}
 
 # ============================================================
@@ -1618,4 +1619,39 @@ func _parse_vector2(val: Variant) -> Vector2:
 			var res = expr.execute([], self)
 			if res is Vector2: return res
 	return Vector2.ZERO
+
+
+func _cmd_find_nodes(params: Dictionary) -> Dictionary:
+	var root_path: String = str(params.get("root", ""))
+	var root_node: Node = get_node_or_null(root_path) if not root_path.is_empty() else get_tree().current_scene
+	if root_node == null:
+		root_node = get_tree().root
+	var pattern: String = str(params.get("pattern", "")).strip_edges()
+	var type_filter: String = str(params.get("type", "")).strip_edges()
+	var group_filter: String = str(params.get("group", "")).strip_edges()
+
+	var matches: Array = []
+	_search_nodes_recursive(root_node, pattern, type_filter, group_filter, matches)
+	return {"status": "ok", "data": {"count": matches.size(), "nodes": matches}}
+
+func _search_nodes_recursive(node: Node, pattern: String, type_filter: String, group_filter: String, results: Array) -> void:
+	var name_matches := pattern.is_empty() or node.name.match(pattern)
+	var type_matches := type_filter.is_empty() or node.is_class(type_filter)
+	var group_matches := group_filter.is_empty() or node.is_in_group(group_filter)
+
+	if name_matches and type_matches and group_matches:
+		var entry := {
+			"name": str(node.name),
+			"type": node.get_class(),
+			"path": str(node.get_path())
+		}
+		if node is Node2D:
+			entry["position"] = _serialize((node as Node2D).position)
+		elif node is Node3D:
+			entry["position"] = _serialize((node as Node3D).position)
+		results.append(entry)
+
+	for child in node.get_children():
+		_search_nodes_recursive(child, pattern, type_filter, group_filter, results)
+
 

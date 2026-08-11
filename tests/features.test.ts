@@ -25,6 +25,12 @@ test("GodotClient handles metrics, get_logs, and action_press commands", async (
           status: "ok",
           data: { action: msg.params.action, pressed: true }
         }) + "\n");
+      } else if (msg.command === "find_nodes") {
+        socket.write(JSON.stringify({
+          id: msg.id,
+          status: "ok",
+          data: { count: 1, nodes: [{ name: "Player", type: "CharacterBody3D", path: "/root/Main/Player" }] }
+        }) + "\n");
       }
     });
   });
@@ -45,6 +51,10 @@ test("GodotClient handles metrics, get_logs, and action_press commands", async (
     const actionRes = await client.send("action_press", { action: "ui_accept" });
     assert.equal(actionRes.status, "ok");
     assert.equal((actionRes.data as any).pressed, true);
+
+    const findRes = await client.send("find_nodes", { pattern: "*Player*" });
+    assert.equal(findRes.status, "ok");
+    assert.equal((findRes.data as any).count, 1);
   } finally {
     server.close();
   }

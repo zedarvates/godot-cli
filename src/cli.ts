@@ -719,12 +719,47 @@ program
   });
 
 program
-  .command("highlight-node")
-  .description("Temporarily highlight a node in the viewport")
-  .argument("<path>", "Node path")
-  .option("--duration <seconds>", "Duration in seconds", "2.0")
-  .action(async (nodePath: string, opts: { duration: string }) => {
-    await run("highlight_node", { path: nodePath, duration: parseFloat(opts.duration) });
+  .command("find-nodes")
+  .description("Find nodes matching wildcard pattern, class type, or node group")
+  .option("--pattern <pattern>", "Name pattern (e.g. *Player* or Enemy*)")
+  .option("--type <class>", "Node class (e.g. CharacterBody3D, Sprite2D)")
+  .option("--group <group>", "Node group name")
+  .option("--root <path>", "Root node path to search from")
+  .action(async (opts: { pattern?: string; type?: string; group?: string; root?: string }) => {
+    await run("find_nodes", {
+      pattern: opts.pattern,
+      type: opts.type,
+      group: opts.group,
+      root: opts.root,
+    });
+  });
+
+program
+  .command("replay")
+  .description("Replay a JSON file containing a sequence of commands with delays")
+  .argument("<file>", "JSON file path containing script sequence")
+  .action(async (filePath: string) => {
+    try {
+      const fullPath = path.resolve(filePath);
+      const content = fs.readFileSync(fullPath, "utf-8");
+      const steps = JSON.parse(content);
+      if (!Array.isArray(steps)) {
+        throw new Error("Replay file must contain a JSON array of command objects");
+      }
+      const opts = program.opts();
+      const client = new GodotClient({ host: opts.host, port: opts.port });
+      for (const step of steps) {
+        if (step.delay_ms && typeof step.delay_ms === "number" && step.delay_ms > 0) {
+          await new Promise((r) => setTimeout(r, step.delay_ms));
+        }
+        const res = await client.send(step.command, step.params || {});
+        process.stdout.write(JSON.stringify(res, null, 2) + "\n");
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`Replay Error: ${msg}\n`);
+      process.exit(1);
+    }
   });
 
 // ---------------------------------------------------------------------------
