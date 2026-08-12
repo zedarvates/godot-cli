@@ -424,6 +424,32 @@ export async function runMcpServer(options: { host?: string; port?: string | num
       },
     },
     {
+      name: "godot_greformer_generate_terrain",
+      description: "Generate low-poly heightmap terrain grid mesh.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          parent: { type: "string", description: "Parent node path (default /root)" },
+          grid_width: { type: "number", description: "Grid width (default 16)" },
+          grid_depth: { type: "number", description: "Grid depth (default 16)" },
+          max_height: { type: "number", description: "Maximum height elevation (default 3.0)" },
+        },
+      },
+    },
+    {
+      name: "godot_greformer_generate_tunnel",
+      description: "Generate modular dungeon tunnel or catacomb corridor section.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          parent: { type: "string", description: "Parent node path (default /root)" },
+          length: { type: "number", description: "Tunnel length (default 6.0)" },
+          width: { type: "number", description: "Tunnel width (default 3.0)" },
+          height: { type: "number", description: "Tunnel height (default 3.0)" },
+        },
+      },
+    },
+    {
       name: "godot_capture_sequence",
       description: "Capture a multi-frame sequence of viewport screenshots as base64 images.",
       inputSchema: {
@@ -482,6 +508,27 @@ export async function runMcpServer(options: { host?: string; port?: string | num
         type: "object",
         properties: {
           duration: { type: "number", description: "Sample duration in seconds (default 1.0)" },
+        },
+      },
+    },
+    {
+      name: "godot_version",
+      description: "Get detailed engine version, build details, OS, and locale information.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "godot_clear_logs",
+      description: "Clear runtime print/warning/error log buffer.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "godot_inspect_node_children",
+      description: "Inspect direct or nested child nodes under a target path.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Target node path" },
+          depth: { type: "number", description: "Inspection depth (default 1)" },
         },
       },
     },
@@ -554,6 +601,8 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_greformer_generate_archway": commandName = "greformer_generate_archway"; break;
           case "godot_greformer_array_duplicate": commandName = "greformer_array_duplicate"; break;
           case "godot_greformer_generate_collision": commandName = "greformer_generate_collision"; break;
+          case "godot_greformer_generate_terrain": commandName = "greformer_generate_terrain"; break;
+          case "godot_greformer_generate_tunnel": commandName = "greformer_generate_tunnel"; break;
           case "godot_capture_sequence": commandName = "capture_sequence"; break;
           case "godot_export_project_api": commandName = "export_project_api"; break;
           case "godot_undo": commandName = "undo"; break;
@@ -562,6 +611,9 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_profile_performance": commandName = "profile_performance"; break;
           case "godot_inspect_node_resources": commandName = "inspect_resources"; break;
           case "godot_record_metrics": commandName = "record_metrics"; break;
+          case "godot_version": commandName = "version"; break;
+          case "godot_clear_logs": commandName = "clear_logs"; break;
+          case "godot_inspect_node_children": commandName = "inspect_children"; break;
           default:
             sendError(id, -32601, `Unknown tool: ${toolName}`);
             return;

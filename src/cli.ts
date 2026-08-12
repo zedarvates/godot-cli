@@ -1112,6 +1112,38 @@ program
   });
 
 program
+  .command("greformer-terrain")
+  .description("Generate low-poly heightmap terrain grid")
+  .option("--parent <path>", "Parent node path", "/root")
+  .option("--width <number>", "Grid width in cells", "16")
+  .option("--depth <number>", "Grid depth in cells", "16")
+  .option("--height <number>", "Maximum height elevation", "3.0")
+  .action(async (opts) => {
+    await run("greformer_generate_terrain", {
+      parent: opts.parent,
+      grid_width: parseInt(opts.width),
+      grid_depth: parseInt(opts.depth),
+      max_height: parseFloat(opts.height),
+    });
+  });
+
+program
+  .command("greformer-tunnel")
+  .description("Generate modular dungeon tunnel / catacomb section")
+  .option("--parent <path>", "Parent node path", "/root")
+  .option("--length <number>", "Tunnel length", "6.0")
+  .option("--width <number>", "Tunnel width", "3.0")
+  .option("--height <number>", "Tunnel height", "3.0")
+  .action(async (opts) => {
+    await run("greformer_generate_tunnel", {
+      parent: opts.parent,
+      length: parseFloat(opts.length),
+      width: parseFloat(opts.width),
+      height: parseFloat(opts.height),
+    });
+  });
+
+program
   .command("undo")
   .description("Undo last editor or scene modification")
   .action(async () => {
@@ -1154,6 +1186,29 @@ program
   .option("--duration <sec>", "Sample duration in seconds", "1.0")
   .action(async (opts: { duration: string }) => {
     await run("record_metrics", { duration: parseFloat(opts.duration) });
+  });
+
+program
+  .command("version")
+  .description("Get detailed engine version, build details, OS, and locale information")
+  .action(async () => {
+    await run("version", {});
+  });
+
+program
+  .command("clear-logs")
+  .description("Clear runtime print/warning/error log buffer")
+  .action(async () => {
+    await run("clear_logs", {});
+  });
+
+program
+  .command("inspect-children")
+  .description("Inspect direct or nested child nodes under a target path")
+  .argument("[node-path]", "Path to node", "")
+  .option("--depth <number>", "Inspection depth", "1")
+  .action(async (nodePath: string, opts: { depth: string }) => {
+    await run("inspect_children", { path: nodePath, depth: parseInt(opts.depth, 10) });
   });
 
 program

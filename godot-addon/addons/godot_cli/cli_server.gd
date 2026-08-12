@@ -427,6 +427,9 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"profile_performance": return _cmd_profile_performance(params)
 		"inspect_resources": return _cmd_inspect_resources(params)
 		"record_metrics": return _cmd_record_metrics(params)
+		"version": return _cmd_version(params)
+		"clear_logs": return _cmd_clear_logs(params)
+		"inspect_children": return _cmd_inspect_children(params)
 		_: return {"status": "error", "error": "Unknown command: " + command}
 
 
@@ -2310,6 +2313,41 @@ func _cmd_record_metrics(params: Dictionary) -> Dictionary:
 		"draw_calls": draw_calls,
 		"vram_bytes": vram
 	}}
+
+func _cmd_version(_params: Dictionary) -> Dictionary:
+	return {"status": "ok", "data": {
+		"engine_version": Engine.get_version_info()["string"],
+		"major": Engine.get_version_info()["major"],
+		"minor": Engine.get_version_info()["minor"],
+		"patch": Engine.get_version_info()["patch"],
+		"os_name": OS.get_name(),
+		"locale": OS.get_locale(),
+		"is_debug": OS.is_debug_build()
+	}}
+
+func _cmd_clear_logs(_params: Dictionary) -> Dictionary:
+	var cleared := _log_buffer.size()
+	_log_buffer.clear()
+	return {"status": "ok", "data": {"cleared_logs": cleared}}
+
+func _cmd_inspect_children(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("path", ""))
+	var depth: int = int(params.get("depth", 1))
+	var node := get_node_or_null(node_path)
+	if node == null:
+		node = get_tree().current_scene if get_tree().current_scene else get_tree().root
+	var children: Array = []
+	for child in node.get_children():
+		var info: Dictionary = {
+			"name": str(child.name),
+			"type": child.get_class(),
+			"path": str(child.get_path())
+		}
+		if child is Node2D: info["position"] = _serialize((child as Node2D).position)
+		elif child is Node3D: info["position"] = _serialize((child as Node3D).position)
+		children.append(info)
+	return {"status": "ok", "data": {"parent": str(node.get_path()), "count": children.size(), "children": children}}
+
 
 
 
