@@ -386,6 +386,44 @@ export async function runMcpServer(options: { host?: string; port?: string | num
       },
     },
     {
+      name: "godot_greformer_generate_archway",
+      description: "Generate parametric archway portal or curved tunnel entrance.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          parent: { type: "string", description: "Parent node path (default /root)" },
+          width: { type: "number", description: "Archway width (default 3.0)" },
+          height: { type: "number", description: "Archway height (default 4.0)" },
+          depth: { type: "number", description: "Archway depth (default 1.0)" },
+        },
+      },
+    },
+    {
+      name: "godot_greformer_array_duplicate",
+      description: "Duplicate GReFormer node in linear or radial array.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_path: { type: "string", description: "Path to GReFormer node" },
+          mode: { type: "string", description: "Array mode ('linear' or 'radial')" },
+          count: { type: "number", description: "Number of copies (default 5)" },
+        },
+        required: ["node_path"],
+      },
+    },
+    {
+      name: "godot_greformer_generate_collision",
+      description: "Generate convex or trimesh collision shape for GReFormer node.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_path: { type: "string", description: "Path to GReFormer node" },
+          mode: { type: "string", description: "Collision mode ('convex' or 'trimesh')" },
+        },
+        required: ["node_path"],
+      },
+    },
+    {
       name: "godot_capture_sequence",
       description: "Capture a multi-frame sequence of viewport screenshots as base64 images.",
       inputSchema: {
@@ -425,6 +463,27 @@ export async function runMcpServer(options: { host?: string; port?: string | num
       name: "godot_profile_performance",
       description: "Deep performance profiler: FPS, frametime, draw calls, VRAM, and orphan node memory leaks.",
       inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "godot_inspect_node_resources",
+      description: "Inspect all attached resources (textures, shaders, audio, collision shapes) on a node.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Node path to inspect" },
+        },
+        required: ["path"],
+      },
+    },
+    {
+      name: "godot_record_metrics",
+      description: "Record time-series performance metrics (FPS, process/physics time, VRAM, draw calls).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          duration: { type: "number", description: "Sample duration in seconds (default 1.0)" },
+        },
+      },
     },
   ];
 
@@ -492,12 +551,17 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_greformer_export_gltf": commandName = "greformer_export_gltf"; break;
           case "godot_greformer_bevel_edges": commandName = "greformer_bevel_edges"; break;
           case "godot_greformer_generate_stairs": commandName = "greformer_generate_stairs"; break;
+          case "godot_greformer_generate_archway": commandName = "greformer_generate_archway"; break;
+          case "godot_greformer_array_duplicate": commandName = "greformer_array_duplicate"; break;
+          case "godot_greformer_generate_collision": commandName = "greformer_generate_collision"; break;
           case "godot_capture_sequence": commandName = "capture_sequence"; break;
           case "godot_export_project_api": commandName = "export_project_api"; break;
           case "godot_undo": commandName = "undo"; break;
           case "godot_redo": commandName = "redo"; break;
           case "godot_fuzzy_find_node": commandName = "fuzzy_find_node"; break;
           case "godot_profile_performance": commandName = "profile_performance"; break;
+          case "godot_inspect_node_resources": commandName = "inspect_resources"; break;
+          case "godot_record_metrics": commandName = "record_metrics"; break;
           default:
             sendError(id, -32601, `Unknown tool: ${toolName}`);
             return;

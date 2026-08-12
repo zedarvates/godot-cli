@@ -1070,6 +1070,48 @@ program
   });
 
 program
+  .command("greformer-archway")
+  .description("Generate parametric archway or curved tunnel portal")
+  .option("--parent <path>", "Parent node path", "/root")
+  .option("--width <number>", "Archway width", "3.0")
+  .option("--height <number>", "Archway height", "4.0")
+  .option("--depth <number>", "Archway depth", "1.0")
+  .action(async (opts) => {
+    await run("greformer_generate_archway", {
+      parent: opts.parent,
+      width: parseFloat(opts.width),
+      height: parseFloat(opts.height),
+      depth: parseFloat(opts.depth),
+    });
+  });
+
+program
+  .command("greformer-array")
+  .description("Duplicate GReFormer node in linear or radial array")
+  .argument("<node-path>", "Path to GReFormer node")
+  .option("--mode <linear|radial>", "Array mode (linear or radial)", "linear")
+  .option("--count <number>", "Number of copies", "5")
+  .action(async (nodePath, opts) => {
+    await run("greformer_array_duplicate", {
+      node_path: nodePath,
+      mode: opts.mode,
+      count: parseInt(opts.count),
+    });
+  });
+
+program
+  .command("greformer-collision")
+  .description("Generate convex or trimesh collision shape for GReFormer node")
+  .argument("<node-path>", "Path to GReFormer node")
+  .option("--mode <convex|trimesh>", "Collision mode (convex or trimesh)", "convex")
+  .action(async (nodePath, opts) => {
+    await run("greformer_generate_collision", {
+      node_path: nodePath,
+      mode: opts.mode,
+    });
+  });
+
+program
   .command("undo")
   .description("Undo last editor or scene modification")
   .action(async () => {
@@ -1096,6 +1138,22 @@ program
   .description("Deep performance profiler: FPS, frametime, draw calls, VRAM, and orphan node memory leaks")
   .action(async () => {
     await run("profile_performance", {});
+  });
+
+program
+  .command("inspect-resources")
+  .description("Inspect all attached resources (textures, shaders, audio, collision shapes) on a node")
+  .argument("<node-path>", "Path to node")
+  .action(async (nodePath: string) => {
+    await run("inspect_resources", { path: nodePath });
+  });
+
+program
+  .command("record-metrics")
+  .description("Record time-series performance metrics (FPS, process/physics time, VRAM, draw calls)")
+  .option("--duration <sec>", "Sample duration in seconds", "1.0")
+  .action(async (opts: { duration: string }) => {
+    await run("record_metrics", { duration: parseFloat(opts.duration) });
   });
 
 program

@@ -425,6 +425,8 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"redo": return _cmd_redo(params)
 		"fuzzy_find_node": return _cmd_fuzzy_find_node(params)
 		"profile_performance": return _cmd_profile_performance(params)
+		"inspect_resources": return _cmd_inspect_resources(params)
+		"record_metrics": return _cmd_record_metrics(params)
 		_: return {"status": "error", "error": "Unknown command: " + command}
 
 
@@ -2275,5 +2277,39 @@ func _cmd_greformer_generate_stairs(params: Dictionary) -> Dictionary:
 		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
 	_add_log("info", "Generated procedural stairs (%d steps, %.2fm height) on %s" % [steps, height, node_path])
 	return {"status": "ok", "data": {"node": node_path, "steps": steps, "total_height": height}}
+
+func _cmd_inspect_resources(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("path", ""))
+	var node := get_node_or_null(node_path)
+	if node == null:
+		return {"status": "error", "error": "Node not found: " + node_path}
+	var res_list: Array = []
+	for p in node.get_property_list():
+		var val = node.get(p.get("name"))
+		if val is Resource:
+			var res := val as Resource
+			res_list.append({
+				"property": str(p.get("name")),
+				"type": res.get_class(),
+				"resource_path": res.resource_path if res.resource_path else "in_memory"
+			})
+	return {"status": "ok", "data": {"node": node_path, "count": res_list.size(), "resources": res_list}}
+
+func _cmd_record_metrics(params: Dictionary) -> Dictionary:
+	var duration: float = float(params.get("duration", 1.0))
+	var fps := Performance.get_monitor(Performance.TIME_FPS)
+	var process_time := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+	var physics_time := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+	var draw_calls := Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)
+	var vram := Performance.get_monitor(Performance.RENDER_TEXTURE_MEM_USED)
+	return {"status": "ok", "data": {
+		"duration_sec": duration,
+		"fps": fps,
+		"process_time_ms": process_time,
+		"physics_time_ms": physics_time,
+		"draw_calls": draw_calls,
+		"vram_bytes": vram
+	}}
+
 
 
