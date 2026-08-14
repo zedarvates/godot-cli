@@ -13,7 +13,7 @@ push or npm publication.
 - [x] Publish pre-release versions under the npm `next` tag, never `latest`.
 - [x] Scan the current publishable tree and all 18 reachable Git commits with Gitleaks; no leak is present.
 - [x] Audit production npm dependencies; zero vulnerabilities were reported on 2026-08-14.
-- [ ] Reconcile the dirty branch into focused commits without staging unrelated local files.
+- [x] Reconcile the dirty branch into focused commits without staging unrelated local files.
 
 ## Automated evidence
 
@@ -22,7 +22,7 @@ push or npm publication.
 - [x] Run the real cross-repository FoveaCore bridge with Godot 4.7-dev5: 83/83 pass.
 - [x] Verify `npm publish --dry-run` preserves the executable, license, metadata, and `next` tag.
 - [x] Add public CI for Node.js 18/22 and the verified official Godot 4.7.1 Linux archive.
-- [ ] Observe the new GitHub Actions workflow passing from a clean pushed branch.
+- [x] Observe the new GitHub Actions workflow passing from a clean pushed branch.
 
 ## First npm pre-release
 
