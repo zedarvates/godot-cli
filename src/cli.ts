@@ -9,6 +9,27 @@ import {
   MAX_ASSERT_CHECKS,
   MAX_SCENE_TREE_DEPTH,
 } from "./doctor.js";
+import {
+  MAX_READY_INTERVAL_MS,
+  MAX_READY_TIMEOUT_MS,
+  MIN_READY_INTERVAL_MS,
+  waitForReady,
+} from "./readiness.js";
+import {
+  buildProjectPreflight,
+  discoverProject,
+  inspectProject,
+} from "./project.js";
+import { buildCompatibilityReport } from "./compatibility.js";
+import {
+  getRuntimeStatus,
+  readRuntimeLogs,
+  startGodotRuntime,
+  stopManagedRuntime,
+  type RuntimeMode,
+} from "./runtime.js";
+import { validateSceneFile } from "./scene-validation.js";
+import { listTestProfiles, runTestProfile } from "./test-runner.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -84,7 +105,29 @@ ADDON MANAGEMENT
   addon install <project> [--dry-run]       Install without enabling the plugin
   addon install <project> --force           Atomically replace a modified copy
 
+PROJECT PREFLIGHT (local read-only; no runtime token required)
+  project discover [start]                  Find project.godot from a path or parent
+  project info [start]                      Inspect Godot, renderer, C# and plugins
+  project preflight [start]                 Run bounded Ultimate Odycer readiness checks
+  project compatibility [start] [--live]    Compare static catalogs and optional live gates
+
+MANAGED RUNTIME (token required; exact addon/autoload required for start)
+  runtime start [project] [--godot PATH]    Launch one owned Godot 4.7 process
+  runtime status [project]                  Verify PID, executable and instance marker
+  runtime logs [project] [--lines 200]      Read a bounded tail of the managed log
+  runtime stop [project]                    Stop only a verified owned process
+
+SCENE FILE VALIDATION (managed, safe-mode, no save)
+  scene validate <scene> [--project PATH]   Load, inspect logs, validate and stop
+
+PROJECT TEST PROFILES (local manifest; no shell)
+  test list [project]                       List declared profiles and availability
+  test run <profile> [project]              Run one bounded, allowlisted profile
+
 COMPATIBILITY
+  ping                                      Probe authenticated engine readiness once
+  wait-for-ready [--timeout 30]             Poll readiness with bounded retries
+  commands                                  List live commands, gates and availability
   doctor [--allow-elevated]                 Verify protocol, Godot and safety gates
 
 SCENE TREE
@@ -100,6 +143,11 @@ NODE OPERATIONS
   rename-node <path> <name>                 Rename a node
   reparent-node <path> <new-parent>         Move a node to a new parent
   call-method <path> <method> [args...]     Call any method on a node
+
+OPTIONAL FOVEACORE
+  fovea status                              Discover the FoveaCore bridge and splat nodes
+  fovea add <parent> <source> [options]     Add an unsaved FoveaSplat3D to the live scene
+  fovea validate                            Validate every FoveaSplat3D source and setting
 
 SCRIPTS
   attach-script <node> <script>             Attach a .gd or .cs script to a node
@@ -137,11 +185,13 @@ VERIFICATION & TESTING
   visible-nodes [--type Sprite2D]           List nodes currently visible in the viewport
 
 QUICK START
-  1. Run: uo-godot-cli addon install /path/to/project --dry-run
-  2. Run again without --dry-run after reviewing the JSON plan
-  3. Enable the GodotCLI plugin in Project Settings > Plugins
-  4. Run your game — server starts on port 9900
-  5. Run: uo-godot-cli scene-tree
+  1. Run: uo-godot-cli project preflight /path/to/project
+  2. Run: uo-godot-cli addon install /path/to/project --dry-run
+  3. Run again without --dry-run after reviewing the JSON plan
+  4. Enable the GodotCLI plugin in Project Settings > Plugins
+  5. Run: uo-godot-cli runtime start /path/to/project --godot /path/to/godot
+  6. Run: uo-godot-cli scene-tree
+  7. Run: uo-godot-cli runtime stop /path/to/project
 
 VALUE FORMATS
   Primitives:    true, 42, 3.14, "hello"
@@ -198,8 +248,373 @@ async function runDoctor(options: { allowElevated?: boolean }): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Project discovery and preflight (local filesystem only; read-only)
+// ---------------------------------------------------------------------------
+
+const projectCommands = program
+  .command("project")
+  .description("Discover and inspect a Godot project without starting Godot");
+
+projectCommands
+  .command("discover")
+  .description("Find project.godot from a path, UO_GODOT_PROJECT, or cwd")
+  .argument("[start]", "File or directory used as the upward search starting point")
+  .action(async (start?: string) => {
+    try {
+      printLocalResult(await discoverProject(start));
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+projectCommands
+  .command("info")
+  .description("Report project features, renderer, C# files, plugins and autoloads")
+  .argument("[start]", "File or directory used to discover project.godot")
+  .action(async (start?: string) => {
+    try {
+      printLocalResult(await inspectProject(start));
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+projectCommands
+  .command("preflight")
+  .description("Run bounded static Ultimate Odycer project readiness checks")
+  .argument("[start]", "File or directory used to discover project.godot")
+  .action(async (start?: string) => {
+    try {
+      const report = await buildProjectPreflight(start);
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+projectCommands
+  .command("compatibility")
+  .description("Compare the bundled CLI manifest with the installed godot_ai catalog")
+  .argument("[start]", "File or directory used to discover project.godot")
+  .option(
+    "--live",
+    "Observe authenticated CLI gates and the local Godot AI MCP tools catalog"
+  )
+  .option("--mcp-port <port>", "Local Godot AI MCP HTTP port", "8000")
+  .option(
+    "--live-timeout <milliseconds>",
+    "Total timeout for each bounded live endpoint probe",
+    "3000"
+  )
+  .action(
+    async (
+      start: string | undefined,
+      options: {
+        live?: boolean;
+        mcpPort: string;
+        liveTimeout: string;
+      }
+    ) => {
+      try {
+        const rootOptions = program.opts();
+        const report = await buildCompatibilityReport(
+          start,
+          {},
+          options.live
+            ? {
+                cliHost: rootOptions.host,
+                cliPort: rootOptions.port,
+                mcpPort: options.mcpPort,
+                timeoutMs: Number(options.liveTimeout),
+              }
+            : undefined
+        );
+        printLocalResult(report);
+        if (report.status !== "ok") process.exitCode = 1;
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
+// ---------------------------------------------------------------------------
+// Strictly owned Godot process lifecycle
+// ---------------------------------------------------------------------------
+
+const runtimeCommands = program
+  .command("runtime")
+  .description("Launch and control a strictly owned local Godot process");
+
+runtimeCommands
+  .command("start")
+  .description("Launch one managed Godot 4.7 process and wait for readiness")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .option("--godot <path>", "Godot 4.7 executable; otherwise GODOT_BIN or PATH")
+  .option("--mode <mode>", "headless, editor, or game", "headless")
+  .option("--scene <path>", "Optional regular res:// scene to launch")
+  .option("--timeout <seconds>", "Bounded readiness timeout", "30")
+  .option("--interval <milliseconds>", "Readiness polling interval", "250")
+  .option("--no-wait", "Return after process ownership is registered")
+  .option("--allow-mutations", "Enable the explicit runtime mutation gate")
+  .option("--allow-unsafe", "Enable both mutation and unsafe capability gates")
+  .action(
+    async (
+      project: string | undefined,
+      options: {
+        godot?: string;
+        mode: string;
+        scene?: string;
+        timeout: string;
+        interval: string;
+        wait: boolean;
+        allowMutations?: boolean;
+        allowUnsafe?: boolean;
+      }
+    ) => {
+      try {
+        const rootOptions = program.opts();
+        const report = await startGodotRuntime({
+          project,
+          godot: options.godot,
+          host: rootOptions.host,
+          port: rootOptions.port,
+          mode: options.mode as RuntimeMode,
+          scene: options.scene,
+          wait: options.wait,
+          timeoutMs: Number(options.timeout) * 1000,
+          intervalMs: Number(options.interval),
+          allowMutations: options.allowMutations,
+          allowUnsafe: options.allowUnsafe,
+        });
+        printLocalResult(report);
+        if (report.status !== "ok") process.exitCode = 1;
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
+runtimeCommands
+  .command("status")
+  .description("Verify the managed process identity without modifying it")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .action(async (project?: string) => {
+    try {
+      const discovery = await discoverProject(project);
+      const report = await getRuntimeStatus(discovery.projectRoot);
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+runtimeCommands
+  .command("logs")
+  .description("Read a bounded tail of the current or last managed runtime log")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .option("--lines <count>", "Maximum returned lines", "200")
+  .option("--bytes <count>", "Maximum returned log bytes", "65536")
+  .action(
+    async (
+      project: string | undefined,
+      options: { lines: string; bytes: string }
+    ) => {
+      try {
+        const discovery = await discoverProject(project);
+        printLocalResult(
+          await readRuntimeLogs(discovery.projectRoot, {
+            maxLines: Number(options.lines),
+            maxBytes: Number(options.bytes),
+          })
+        );
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
+runtimeCommands
+  .command("stop")
+  .description("Stop only the process matching the stored executable and instance marker")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .option("--timeout <seconds>", "Maximum graceful stop wait", "10")
+  .action(async (project: string | undefined, options: { timeout: string }) => {
+    try {
+      const discovery = await discoverProject(project);
+      const report = await stopManagedRuntime(discovery.projectRoot, {
+        timeoutMs: Number(options.timeout) * 1000,
+      });
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// One-shot scene file validation (owned runtime, safe mode, no save)
+// ---------------------------------------------------------------------------
+
+const sceneCommands = program
+  .command("scene")
+  .description("Validate a scene file through a temporary owned Godot runtime");
+
+sceneCommands
+  .command("validate")
+  .description("Load one scene, run structural checks, inspect logs, then stop")
+  .argument("<scene>", "Regular res:// .tscn or .scn file")
+  .option("--project <path>", "Godot project path; otherwise discover from env or cwd")
+  .option("--godot <path>", "Godot 4.7 executable; otherwise GODOT_BIN or PATH")
+  .option("--timeout <seconds>", "Bounded readiness timeout", "30")
+  .option("--interval <milliseconds>", "Readiness polling interval", "250")
+  .action(
+    async (
+      scene: string,
+      options: {
+        project?: string;
+        godot?: string;
+        timeout: string;
+        interval: string;
+      }
+    ) => {
+      try {
+        const rootOptions = program.opts();
+        const report = await validateSceneFile({
+          scene,
+          project: options.project,
+          godot: options.godot,
+          host: rootOptions.host,
+          port: rootOptions.port,
+          timeoutMs: Number(options.timeout) * 1000,
+          intervalMs: Number(options.interval),
+        });
+        printLocalResult(report);
+        if (report.status !== "ok") process.exitCode = 1;
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
+// ---------------------------------------------------------------------------
+// Project-defined, bounded test profiles
+// ---------------------------------------------------------------------------
+
+const testCommands = program
+  .command("test")
+  .description("List or run allowlisted profiles from .uo-godot-tests.json");
+
+testCommands
+  .command("list")
+  .description("List declared test profiles and dependency availability")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .option("--godot <path>", "Godot 4.7 executable; otherwise GODOT_BIN or PATH")
+  .action(async (project: string | undefined, options: { godot?: string }) => {
+    try {
+      printLocalResult(await listTestProfiles({ project, godot: options.godot }));
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+testCommands
+  .command("run")
+  .description("Run exactly one declared profile without invoking a shell")
+  .argument("<profile>", "Profile id declared in .uo-godot-tests.json")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .option("--godot <path>", "Godot 4.7 executable; otherwise GODOT_BIN or PATH")
+  .option(
+    "--timeout <seconds>",
+    "Optional lower timeout; cannot exceed the manifest profile limit"
+  )
+  .action(
+    async (
+      profile: string,
+      project: string | undefined,
+      options: { godot?: string; timeout?: string }
+    ) => {
+      try {
+        const timeoutSeconds =
+          options.timeout === undefined ? undefined : Number(options.timeout);
+        const report = await runTestProfile({
+          profile,
+          project,
+          godot: options.godot,
+          timeoutSeconds,
+        });
+        printLocalResult(report);
+        if (report.status !== "ok") process.exitCode = 1;
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
+// ---------------------------------------------------------------------------
 // Compatibility gate
 // ---------------------------------------------------------------------------
+
+program
+  .command("ping")
+  .description("Probe authenticated Godot engine readiness once")
+  .action(async () => {
+    await run("ping");
+  });
+
+program
+  .command("commands")
+  .description("List live commands, security categories and gate availability")
+  .action(async () => {
+    await run("commands");
+  });
+
+program
+  .command("wait-for-ready")
+  .description("Poll the authenticated readiness probe until Godot is ready")
+  .option("--timeout <seconds>", "Maximum wait in seconds", "30")
+  .option("--interval <milliseconds>", "Delay between attempts", "250")
+  .action(async (options: { timeout: string; interval: string }) => {
+    const timeoutSeconds = Number(options.timeout);
+    const intervalMs = Number(options.interval);
+    if (
+      !Number.isFinite(timeoutSeconds) ||
+      timeoutSeconds <= 0 ||
+      timeoutSeconds * 1000 > MAX_READY_TIMEOUT_MS
+    ) {
+      reportLocalError(
+        new Error(
+          `--timeout must be greater than 0 and at most ${MAX_READY_TIMEOUT_MS / 1000} seconds`
+        )
+      );
+      return;
+    }
+    if (
+      !Number.isFinite(intervalMs) ||
+      intervalMs < MIN_READY_INTERVAL_MS ||
+      intervalMs > MAX_READY_INTERVAL_MS
+    ) {
+      reportLocalError(
+        new Error(
+          `--interval must be between ${MIN_READY_INTERVAL_MS} and ${MAX_READY_INTERVAL_MS} milliseconds`
+        )
+      );
+      return;
+    }
+
+    const rootOptions = program.opts();
+    try {
+      const report = await waitForReady(
+        new GodotClient({ host: rootOptions.host, port: rootOptions.port }),
+        { timeoutMs: timeoutSeconds * 1000, intervalMs }
+      );
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
 
 program
   .command("doctor")
@@ -587,6 +1002,76 @@ program
   .argument("<class>", "Class name (e.g. Node2D, Sprite2D, CharacterBody2D)")
   .action(async (className: string) => {
     await run("class_info", { class: className });
+  });
+
+// ---------------------------------------------------------------------------
+// Optional FoveaCore commands
+// ---------------------------------------------------------------------------
+
+const fovea = program
+  .command("fovea")
+  .description("Control the optional, versioned FoveaCore automation bridge");
+
+fovea
+  .command("status")
+  .description("Discover FoveaCore and list splat nodes in the current scene")
+  .action(async () => {
+    await run("fovea_status");
+  });
+
+fovea
+  .command("add")
+  .description("Add an unsaved FoveaSplat3D from an existing project asset")
+  .argument("<parent>", "Parent node path inside the current scene")
+  .argument("<source>", "Existing res:// .fovea, .ply, or .splat asset")
+  .option("--name <name>", "Deterministic node name")
+  .option("--quality <preset>", "auto, performance, balanced, or cinematic", "auto")
+  .option("--opacity <value>", "Opacity from 0 to 1", "1")
+  .option("--collisions", "Generate collisions (native .fovea sources only)")
+  .option("--dynamic", "Mark the splat as dynamic instead of static")
+  .action(
+    async (
+      parent: string,
+      source: string,
+      opts: {
+        name?: string;
+        quality: string;
+        opacity: string;
+        collisions?: boolean;
+        dynamic?: boolean;
+      }
+    ) => {
+      const qualities = new Set(["auto", "performance", "balanced", "cinematic"]);
+      const quality = opts.quality.toLowerCase();
+      if (!qualities.has(quality)) {
+        throw new Error(
+          "--quality must be auto, performance, balanced, or cinematic"
+        );
+      }
+      const opacity = Number(opts.opacity);
+      if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) {
+        throw new Error("--opacity must be a finite number between 0 and 1");
+      }
+      const params: Record<string, unknown> = {
+        parent,
+        source_path: source,
+        quality,
+        opacity,
+        generate_collisions: opts.collisions === true,
+        is_static: opts.dynamic !== true,
+      };
+      if (opts.name) params.name = opts.name;
+      await run("fovea_add_splat", params, { timeoutMs: 60_000 });
+    }
+  );
+
+fovea
+  .command("validate")
+  .description("Validate FoveaCore availability and every splat in the scene")
+  .action(async () => {
+    await run("fovea_validate", {}, {
+      exitOnFail: (data) => data.valid !== true,
+    });
   });
 
 // ---------------------------------------------------------------------------

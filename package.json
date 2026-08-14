@@ -1,16 +1,27 @@
 {
   "name": "@ultimate-odycer/godot-runtime-cli",
-  "version": "0.1.0-uo.4",
+  "version": "0.1.0-uo.7",
   "description": "Hardened, local-only runtime CLI for Ultimate Odycer Godot development",
+  "keywords": [
+    "godot",
+    "cli",
+    "automation",
+    "testing",
+    "coding-agents",
+    "gaussian-splatting"
+  ],
   "type": "module",
   "bin": {
-    "uo-godot-cli": "./dist/cli.js"
+    "uo-godot-cli": "dist/cli.js"
   },
   "files": [
     "dist/",
     "godot-addon/addons/godot_cli/",
     "README.md",
-    "SECURITY.md"
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
@@ -29,5 +40,17 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zedarvates/godot-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zedarvates/godot-cli/issues"
+  },
+  "homepage": "https://github.com/zedarvates/godot-cli#readme",
   "license": "MIT"
 }

@@ -32,7 +32,7 @@ before(async (t) => {
     return;
   }
 
-  launchPort = 9905;
+  launchPort = await findFreePort();
   launchToken = crypto.randomBytes(32).toString("hex");
 
   const env = {
@@ -59,7 +59,6 @@ before(async (t) => {
   client = new GodotClient({
     port: launchPort,
     token: launchToken,
-    timeoutMs: 5000,
   });
 
   let connected = false;
@@ -102,6 +101,109 @@ test("smoke test: server_info returns runtime contract", async (t) => {
   assert.equal(typeof res.data.addon_version, "string");
   assert.equal(res.data.gates.mutations_enabled, true);
   assert.equal(res.data.gates.unsafe_enabled, true);
+});
+
+test("smoke test: ping and command discovery report live gates", async (t) => {
+  if (!GODOT_BIN) {
+    t.skip("GODOT_BIN not set");
+    return;
+  }
+
+  const ping = await client.send("ping");
+  assert.equal(ping.status, "ok");
+  assert.equal(ping.data.ready, true);
+  assert.equal(ping.data.addon_version, "0.1.0-uo.7");
+  assert.equal(ping.data.gates.mutations_enabled, true);
+  assert.equal(ping.data.gates.unsafe_enabled, true);
+
+  const catalog = await client.send("commands");
+  assert.equal(catalog.status, "ok");
+  assert.equal(catalog.data.catalog_version, 1);
+  assert.equal(catalog.data.protocol, "godot_cli_tcp_ndjson");
+  assert.equal(catalog.data.mcp_server, false);
+  assert.equal(catalog.data.annotations_are_security_controls, false);
+  assert.equal(catalog.data.count, 34);
+  assert.equal(catalog.data.commands.length, 34);
+  const sceneTree = catalog.data.commands.find((entry) => entry.name === "scene_tree");
+  assert.equal(sceneTree.security, "read_only");
+  assert.match(sceneTree.description, /hierarchy/);
+  assert.deepEqual(sceneTree.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  });
+
+  const setProperty = catalog.data.commands.find((entry) => entry.name === "set_property");
+  assert.equal(setProperty.enabled, true);
+  assert.deepEqual(setProperty.annotations, {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  });
+
+  const evaluated = catalog.data.commands.find((entry) => entry.name === "eval");
+  assert.equal(evaluated.required_gate, "GODOT_CLI_ALLOW_UNSAFE");
+  assert.deepEqual(evaluated.annotations, {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: true,
+  });
+
+  const asserted = catalog.data.commands.find((entry) => entry.name === "assert");
+  assert.equal(asserted.conditionally_unsafe, true);
+  assert.equal(asserted.annotations.readOnlyHint, false);
+  assert.equal(asserted.annotations.destructiveHint, true);
+  assert.equal(
+    catalog.data.commands.find((entry) => entry.name === "fovea_status").security,
+    "read_only"
+  );
+  assert.equal(
+    catalog.data.commands.find((entry) => entry.name === "fovea_add_splat").security,
+    "mutating"
+  );
+});
+
+test("smoke test: optional FoveaCore bridge adds and validates a splat", async (t) => {
+  if (!GODOT_BIN) {
+    t.skip("GODOT_BIN not set");
+    return;
+  }
+
+  const status = await client.send("fovea_status");
+  assert.equal(status.status, "ok");
+  assert.equal(status.data.available, true);
+  assert.equal(status.data.compatible, true);
+  assert.equal(status.data.contract.version, 1);
+  assert.equal(status.data.splat_count, 0);
+
+  const escaped = await client.send("fovea_add_splat", {
+    parent: "/root/SecurityFixture",
+    source_path: "res://../outside.ply",
+  });
+  assert.equal(escaped.status, "error");
+  assert.match(escaped.error, /inside res:\/\//);
+
+  const added = await client.send("fovea_add_splat", {
+    parent: "/root/SecurityFixture",
+    source_path: "res://fixture.ply",
+    name: "CliBonsaiSplat",
+    quality: "balanced",
+    opacity: 0.75,
+    generate_collisions: false,
+    is_static: true,
+  });
+  assert.equal(added.status, "ok");
+  assert.equal(added.data.type, "FoveaSplat3D");
+  assert.equal(added.data.persisted, false);
+
+  const validation = await client.send("fovea_validate");
+  assert.equal(validation.status, "ok");
+  assert.equal(validation.data.valid, true);
+  assert.equal(validation.data.complete, true);
+  assert.equal(validation.data.splat_count, 1);
 });
 
 test("smoke test: scene_tree returns node hierarchy", async (t) => {

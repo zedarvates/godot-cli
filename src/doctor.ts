@@ -1,4 +1,4 @@
-export const CLI_VERSION = "0.1.0-uo.4";
+export const CLI_VERSION = "0.1.0-uo.7";
 export const EXPECTED_PROTOCOL_VERSION = 1;
 export const EXPECTED_GODOT_MAJOR = 4;
 export const EXPECTED_GODOT_MINOR = 7;
@@ -47,6 +47,10 @@ export function buildDoctorReport(
   const endpoint = asRecord(server?.endpoint);
   const gates = asRecord(server?.gates);
   const limits = asRecord(server?.limits);
+  const commands = asRecord(server?.commands);
+  const readOnlyCommands = Array.isArray(commands?.read_only)
+    ? commands.read_only
+    : [];
 
   const compatibilityChecks = [
     check("server_info_envelope", "object", server === null ? typeof value : "object", server !== null),
@@ -87,6 +91,12 @@ export function buildDoctorReport(
         limits?.max_assert_checks === MAX_ASSERT_CHECKS &&
         typeof limits?.max_scene_nodes === "number" &&
         typeof limits?.max_visible_nodes === "number"
+    ),
+    check(
+      "readiness_discovery",
+      ["commands", "ping"],
+      readOnlyCommands,
+      readOnlyCommands.includes("commands") && readOnlyCommands.includes("ping")
     ),
   ];
 

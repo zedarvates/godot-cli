@@ -43,6 +43,11 @@ function serverInfo(overrides = {}) {
       max_visible_nodes: 4096,
       max_assert_checks: 256,
     },
+    commands: {
+      read_only: ["commands", "ping", "server_info"],
+      mutating: [],
+      unsafe: [],
+    },
     ...overrides,
   };
 }
@@ -90,6 +95,21 @@ test("doctor rejects malformed server metadata", () => {
   assert.equal(report.server, null);
 });
 
+test("doctor rejects runtimes without readiness discovery", () => {
+  const report = buildDoctorReport(
+    serverInfo({
+      commands: { read_only: ["server_info"], mutating: [], unsafe: [] },
+    })
+  );
+
+  assert.equal(report.status, "error");
+  assert.equal(report.compatible, false);
+  assert.equal(
+    report.checks.find((entry) => entry.name === "readiness_discovery").ok,
+    false
+  );
+});
+
 test("CLI rejects non-finite wait bounds before connecting", async () => {
   const invalidTimeout = await runCli([
     "wait-for",
@@ -114,6 +134,22 @@ test("CLI rejects non-finite wait bounds before connecting", async () => {
   ]);
   assert.equal(invalidInterval.code, 1);
   assert.match(invalidInterval.stderr, /--interval must be a positive finite number/);
+
+  const excessiveReadyTimeout = await runCli([
+    "wait-for-ready",
+    "--timeout",
+    "301",
+  ]);
+  assert.equal(excessiveReadyTimeout.code, 1);
+  assert.match(excessiveReadyTimeout.stderr, /greater than 0 and at most 300 seconds/);
+
+  const shortReadyInterval = await runCli([
+    "wait-for-ready",
+    "--interval",
+    "49",
+  ]);
+  assert.equal(shortReadyInterval.code, 1);
+  assert.match(shortReadyInterval.stderr, /between 50 and 5000 milliseconds/);
 });
 
 test("CLI rejects unbounded scene and assertion requests before connecting", async () => {

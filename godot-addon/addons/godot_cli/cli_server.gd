@@ -2,12 +2,12 @@ extends Node
 ## GodotCLI Server
 ## TCP server that accepts newline-delimited JSON commands for controlling the running game.
 ## Protocol: Each message is a JSON object followed by \n.
-## Target: Godot 4.6.x
+## Target: Godot 4.7.x
 
 const DEFAULT_PORT := 9900
 const BIND_ADDRESS := "127.0.0.1"
 const PROTOCOL_VERSION := 1
-const ADDON_VERSION := "0.1.0-uo.4"
+const ADDON_VERSION := "0.1.0-uo.7"
 const MIN_TOKEN_LENGTH := 32
 const MAX_MESSAGE_BYTES := 1024 * 1024
 const MAX_RESPONSE_BYTES := 16 * 1024 * 1024
@@ -23,8 +23,70 @@ const MAX_SCENE_TREE_DEPTH := 64
 const MAX_SCENE_NODES := 4096
 const MAX_VISIBLE_NODES := 4096
 const MAX_ASSERT_CHECKS := 256
+const FOVEA_BRIDGE_PATH := "res://addons/foveacore/scripts/integration/fovea_cli_bridge.gd"
+const FOVEA_CONTRACT_VERSION := 1
+
+const COMMAND_DESCRIPTIONS := {
+	"ping": "Probe authenticated Godot runtime readiness.",
+	"commands": "List live commands, capability gates, and agent-facing safety metadata.",
+	"server_info": "Return the runtime, endpoint, security gates, and protocol limits.",
+	"scene_tree": "Inspect a bounded hierarchy of the live scene tree.",
+	"get_node": "Read the serialized properties of one live node.",
+	"screenshot": "Capture the current viewport as PNG data without writing a project file.",
+	"read_file": "Read one bounded project file contained inside res://.",
+	"list_files": "List a bounded set of project files contained inside res://.",
+	"list_classes": "List bounded Godot engine class metadata.",
+	"class_info": "Inspect properties, methods, and signals for one Godot class.",
+	"wait_for": "Wait for a bounded property condition or gated expression to become true.",
+	"assert": "Evaluate bounded property checks or gated expressions and report pass or fail.",
+	"validate_scene": "Run bounded structural validation on the current scene.",
+	"fovea_status": "Inspect the optional FoveaCore bridge and live splat nodes.",
+	"fovea_validate": "Validate the optional FoveaCore bridge and live splat nodes.",
+	"viewport_info": "Read live viewport, rendering, physics, memory, and engine metrics.",
+	"visible_nodes": "List a bounded set of nodes visible in the current viewport.",
+	"set_property": "Set one property on one live node.",
+	"add_node": "Create one unsaved node under a live parent node.",
+	"remove_node": "Remove one live node and its descendants.",
+	"reparent_node": "Move one live node beneath a different parent.",
+	"rename_node": "Rename one live node.",
+	"click": "Inject one mouse click into the running project.",
+	"press_key": "Inject one bounded key press into the running project.",
+	"mouse_move": "Move the simulated mouse pointer to an absolute position.",
+	"load_scene": "Replace the current live scene with an existing res:// scene.",
+	"fovea_add_splat": "Add one unsaved FoveaSplat3D through the versioned FoveaCore bridge.",
+	"call_method": "Invoke an arbitrary method on one live node.",
+	"eval": "Compile and execute gated GDScript in the running project.",
+	"create_file": "Create or overwrite one bounded project file inside res://.",
+	"delete_file": "Delete one project file contained inside res://.",
+	"attach_script": "Attach an existing res:// script to one live node.",
+	"detach_script": "Detach the script from one live node.",
+	"save_scene": "Persist the current live scene to a bounded res:// path.",
+}
+
+## Conservative MCP-compatible hints. They improve agent planning but never
+## replace the server's authentication, path validation, or capability gates.
+const DESTRUCTIVE_COMMANDS := {
+	"wait_for": true,
+	"assert": true,
+	"remove_node": true,
+	"load_scene": true,
+	"call_method": true,
+	"eval": true,
+	"create_file": true,
+	"delete_file": true,
+	"attach_script": true,
+	"detach_script": true,
+	"save_scene": true,
+}
+
+const IDEMPOTENT_MUTATING_COMMANDS := {
+	"set_property": true,
+	"mouse_move": true,
+}
 
 const READ_ONLY_COMMANDS := {
+	"ping": true,
+	"commands": true,
 	"server_info": true,
 	"scene_tree": true,
 	"get_node": true,
@@ -36,6 +98,8 @@ const READ_ONLY_COMMANDS := {
 	"wait_for": true,
 	"assert": true,
 	"validate_scene": true,
+	"fovea_status": true,
+	"fovea_validate": true,
 	"viewport_info": true,
 	"visible_nodes": true,
 }
@@ -50,6 +114,7 @@ const MUTATING_COMMANDS := {
 	"press_key": true,
 	"mouse_move": true,
 	"load_scene": true,
+	"fovea_add_splat": true,
 }
 
 const UNSAFE_COMMANDS := {
@@ -58,6 +123,8 @@ const UNSAFE_COMMANDS := {
 	"create_file": true,
 	"delete_file": true,
 	"attach_script": true,
+	"detach_script": true,
+	"save_scene": true,
 }
 
 var _auth_token := ""
@@ -124,7 +191,21 @@ func _process(_delta: float) -> void:
 	# Accept new connections
 	while _server.is_connection_available():
 		var peer := _server.take_connection()
-		_clients.append({"peer": peer, "buffer": ""})
+		if _clients.size() >= MAX_CLIENTS:
+			var rejection := JSON.stringify({
+				"id": "",
+				"status": "error",
+				"error": "Maximum concurrent client limit reached",
+			}) + "\n"
+			peer.put_data(rejection.to_utf8_buffer())
+			peer.disconnect_from_host()
+			continue
+		_clients.append({
+			"peer": peer,
+			"buffer": "",
+			"connected_at_ms": Time.get_ticks_msec(),
+			"authenticated": false,
+		})
 
 	# Process each client
 	var to_remove: Array[int] = []
@@ -140,7 +221,19 @@ func _process(_delta: float) -> void:
 					var data := peer.get_data(available)
 					if data[0] == OK:
 						client["buffer"] += data[1].get_string_from_utf8()
+						if (client["buffer"] as String).to_utf8_buffer().size() > MAX_MESSAGE_BYTES:
+							_send(client, {"id": "", "status": "error", "error": "Request exceeds the maximum message size"})
+							peer.disconnect_from_host()
+							to_remove.append(i)
+							continue
 						_process_buffer(client)
+				if (
+					not bool(client.get("authenticated", false))
+					and Time.get_ticks_msec() - int(client["connected_at_ms"]) >= AUTH_TIMEOUT_MSEC
+				):
+					_send(client, {"id": "", "status": "error", "error": "Authentication timeout"})
+					peer.disconnect_from_host()
+					to_remove.append(i)
 			StreamPeerTCP.STATUS_ERROR, StreamPeerTCP.STATUS_NONE:
 				to_remove.append(i)
 
@@ -167,29 +260,62 @@ func _process_buffer(client: Dictionary) -> void:
 		client["buffer"] = buf.substr(idx + 1)
 		if line.strip_edges().is_empty():
 			continue
-		_handle_message(client, line)
+		if not _handle_message(client, line):
+			break
 
 
-func _handle_message(client: Dictionary, line: String) -> void:
+func _handle_message(client: Dictionary, line: String) -> bool:
 	var parsed = JSON.parse_string(line)
-	if parsed == null:
+	if parsed == null or not parsed is Dictionary:
 		_send(client, {"id": "", "status": "error", "error": "Invalid JSON"})
-		return
+		return true
 
-	var id: String = str(parsed.get("id", ""))
-	var command: String = str(parsed.get("command", ""))
-	var params: Dictionary = parsed.get("params", {})
+	var request: Dictionary = parsed
+	var id: String = str(request.get("id", ""))
+	var supplied_token := str(request.get("token", ""))
+	if not _constant_time_equals(supplied_token, _auth_token):
+		_send(client, {"id": id, "status": "error", "error": "Authentication failed"})
+		var peer: StreamPeerTCP = client["peer"]
+		peer.disconnect_from_host()
+		return false
+	client["authenticated"] = true
+
+	var command: String = str(request.get("command", ""))
+	var raw_params = request.get("params", {})
+	if not raw_params is Dictionary:
+		_send(client, {"id": id, "status": "error", "error": "Invalid params"})
+		return true
+	var params: Dictionary = raw_params
 
 	var result = _execute(command, params, client, id)
 	if result != null:
 		result["id"] = id
 		_send(client, result)
+	return true
 
 
 func _send(client: Dictionary, response: Dictionary) -> void:
 	var json := JSON.stringify(response) + "\n"
+	if json.to_utf8_buffer().size() > MAX_RESPONSE_BYTES:
+		json = JSON.stringify({
+			"id": response.get("id", ""),
+			"status": "error",
+			"error": "Response exceeds the maximum message size",
+		}) + "\n"
 	var peer: StreamPeerTCP = client["peer"]
 	peer.put_data(json.to_utf8_buffer())
+
+
+func _constant_time_equals(left: String, right: String) -> bool:
+	var left_bytes := left.to_utf8_buffer()
+	var right_bytes := right.to_utf8_buffer()
+	var difference := left_bytes.size() ^ right_bytes.size()
+	var max_size: int = maxi(left_bytes.size(), right_bytes.size())
+	for index in range(max_size):
+		var left_value: int = left_bytes[index] if index < left_bytes.size() else 0
+		var right_value: int = right_bytes[index] if index < right_bytes.size() else 0
+		difference |= left_value ^ right_value
+	return difference == 0
 
 func _sorted_command_names(commands: Dictionary) -> Array[String]:
 	var names: Array[String] = []
@@ -238,10 +364,80 @@ func _cmd_server_info(_params: Dictionary) -> Dictionary:
 	}}
 
 
+func _cmd_ping(_params: Dictionary) -> Dictionary:
+	return {"status": "ok", "data": {
+		"ready": true,
+		"protocol_version": PROTOCOL_VERSION,
+		"addon_version": ADDON_VERSION,
+		"engine": Engine.get_version_info(),
+		"endpoint": {
+			"bind_address": BIND_ADDRESS,
+			"port": _listen_port,
+		},
+		"gates": {
+			"mutations_enabled": _allow_mutations,
+			"unsafe_enabled": _allow_unsafe,
+		},
+	}}
+
+
+func _command_catalog_entries(
+	commands: Dictionary,
+	security: String,
+	enabled: bool,
+	required_gate: String
+) -> Array[Dictionary]:
+	var entries: Array[Dictionary] = []
+	for command in _sorted_command_names(commands):
+		var conditionally_unsafe := command == "wait_for" or command == "assert"
+		var read_only := security == "read_only" and not conditionally_unsafe
+		entries.append({
+			"name": command,
+			"title": command.replace("_", " ").capitalize(),
+			"description": str(COMMAND_DESCRIPTIONS.get(command, "Godot runtime command.")),
+			"security": security,
+			"enabled": enabled,
+			"required_gate": required_gate,
+			"conditionally_unsafe": conditionally_unsafe,
+			"annotations": {
+				"readOnlyHint": read_only,
+				"destructiveHint": DESTRUCTIVE_COMMANDS.has(command),
+				"idempotentHint": read_only or IDEMPOTENT_MUTATING_COMMANDS.has(command),
+				"openWorldHint": true,
+			},
+		})
+	return entries
+
+
+func _cmd_commands(_params: Dictionary) -> Dictionary:
+	var entries: Array[Dictionary] = []
+	entries.append_array(_command_catalog_entries(READ_ONLY_COMMANDS, "read_only", true, "none"))
+	entries.append_array(_command_catalog_entries(MUTATING_COMMANDS, "mutating", _allow_mutations, "GODOT_CLI_ALLOW_MUTATIONS"))
+	entries.append_array(_command_catalog_entries(UNSAFE_COMMANDS, "unsafe", _allow_unsafe, "GODOT_CLI_ALLOW_UNSAFE"))
+	return {"status": "ok", "data": {
+		"catalog_version": 1,
+		"protocol": "godot_cli_tcp_ndjson",
+		"mcp_server": false,
+		"annotations_are_security_controls": false,
+		"count": entries.size(),
+		"commands": entries,
+		"gates": {
+			"mutations_enabled": _allow_mutations,
+			"unsafe_enabled": _allow_unsafe,
+		},
+	}}
+
+
 # --- Command Dispatch ---
 
 func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: String = "") -> Variant:
+	var denial := _command_denial(command, params)
+	if not denial.is_empty():
+		return {"status": "error", "error": denial}
+
 	match command:
+		"ping": return _cmd_ping(params)
+		"commands": return _cmd_commands(params)
 		"server_info": return _cmd_server_info(params)
 		"scene_tree": return _cmd_scene_tree(params)
 		"get_node": return _cmd_get_node(params)
@@ -271,9 +467,43 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 			return null  # Response is deferred
 		"assert": return _cmd_assert(params)
 		"validate_scene": return _cmd_validate_scene(params)
+		"fovea_status": return _cmd_fovea_status(params)
+		"fovea_validate": return _cmd_fovea_validate(params)
+		"fovea_add_splat": return _cmd_fovea_add_splat(params)
 		"viewport_info": return _cmd_viewport_info(params)
 		"visible_nodes": return _cmd_visible_nodes(params)
 		_: return {"status": "error", "error": "Unknown command: " + command}
+
+
+func _command_denial(command: String, params: Dictionary) -> String:
+	if READ_ONLY_COMMANDS.has(command):
+		if _params_require_unsafe(command, params) and not _allow_unsafe:
+			return "Expression execution is disabled; set GODOT_CLI_ALLOW_UNSAFE=1 before launching Godot"
+		return ""
+	if MUTATING_COMMANDS.has(command):
+		if not _allow_mutations:
+			return "Mutation commands are disabled; set GODOT_CLI_ALLOW_MUTATIONS=1 before launching Godot"
+		return ""
+	if UNSAFE_COMMANDS.has(command):
+		if not _allow_unsafe:
+			return "Unsafe commands are disabled; set GODOT_CLI_ALLOW_UNSAFE=1 before launching Godot"
+		return ""
+	return ""
+
+
+func _params_require_unsafe(command: String, params: Dictionary) -> bool:
+	if command == "wait_for":
+		return not str(params.get("expr", "")).is_empty()
+	if command != "assert":
+		return false
+	if not str(params.get("expr", "")).is_empty():
+		return true
+	var checks = params.get("checks", [])
+	if checks is Array:
+		for check in checks:
+			if check is Dictionary and (check as Dictionary).has("expr"):
+				return true
+	return false
 
 # ============================================================
 # Serialization
@@ -431,8 +661,19 @@ func _deserialize(value: Variant) -> Variant:
 # --- Scene Tree ---
 
 func _cmd_scene_tree(params: Dictionary) -> Dictionary:
-	var max_depth: int = params.get("depth", 10)
+	var raw_depth = params.get("depth", 10)
 	var root_path: String = params.get("root", "")
+	if not (raw_depth is int or raw_depth is float):
+		return {"status": "error", "error": "scene-tree depth must be an integer"}
+	var depth_number := float(raw_depth)
+	if is_nan(depth_number) or is_inf(depth_number) or depth_number != floor(depth_number):
+		return {"status": "error", "error": "scene-tree depth must be an integer"}
+	var max_depth := int(depth_number)
+	if max_depth < 0 or max_depth > MAX_SCENE_TREE_DEPTH:
+		return {
+			"status": "error",
+			"error": "scene-tree depth must be between 0 and %d" % MAX_SCENE_TREE_DEPTH,
+		}
 
 	var root: Node
 	if root_path.is_empty():
@@ -442,10 +683,18 @@ func _cmd_scene_tree(params: Dictionary) -> Dictionary:
 		if root == null:
 			return {"status": "error", "error": "Node not found: " + root_path}
 
-	return {"status": "ok", "data": _build_tree(root, max_depth)}
+	var traversal := {"visited": 0, "truncated": false}
+	var tree := _build_tree(root, max_depth, 0, traversal)
+	tree["_cli"] = {
+		"visited_nodes": traversal["visited"],
+		"truncated": traversal["truncated"],
+		"max_nodes": MAX_SCENE_NODES,
+	}
+	return {"status": "ok", "data": tree}
 
 
-func _build_tree(node: Node, max_depth: int, depth: int = 0) -> Dictionary:
+func _build_tree(node: Node, max_depth: int, depth: int, traversal: Dictionary) -> Dictionary:
+	traversal["visited"] = int(traversal["visited"]) + 1
 	var data: Dictionary = {
 		"name": str(node.name),
 		"type": node.get_class(),
@@ -458,7 +707,11 @@ func _build_tree(node: Node, max_depth: int, depth: int = 0) -> Dictionary:
 	var children: Array = []
 	if depth < max_depth:
 		for child in node.get_children():
-			children.append(_build_tree(child, max_depth, depth + 1))
+			if int(traversal["visited"]) >= MAX_SCENE_NODES:
+				traversal["truncated"] = true
+				data["truncated_children"] = node.get_child_count() - children.size()
+				break
+			children.append(_build_tree(child, max_depth, depth + 1, traversal))
 	elif node.get_child_count() > 0:
 		data["child_count"] = node.get_child_count()
 	data["children"] = children
@@ -782,6 +1035,21 @@ func _cmd_mouse_move(params: Dictionary) -> Dictionary:
 
 # --- File Operations ---
 
+func _resolve_project_path(path: String) -> String:
+	if not path.begins_with("res://"):
+		return ""
+	var project_root := ProjectSettings.globalize_path("res://").simplify_path()
+	var resolved := ProjectSettings.globalize_path(path).simplify_path()
+	var root_prefix := project_root
+	if not root_prefix.ends_with("/"):
+		root_prefix += "/"
+	var resolved_lower := resolved.to_lower()
+	var root_lower := project_root.to_lower()
+	var prefix_lower := root_prefix.to_lower()
+	if resolved_lower != root_lower and not resolved_lower.begins_with(prefix_lower):
+		return ""
+	return resolved
+
 func _cmd_create_file(params: Dictionary) -> Dictionary:
 	var path: String = params.get("path", "")
 	var content: String = params.get("content", "")
@@ -789,9 +1057,12 @@ func _cmd_create_file(params: Dictionary) -> Dictionary:
 	if path.is_empty():
 		return {"status": "error", "error": "Missing 'path' parameter"}
 
-	var abs_path := path
-	if path.begins_with("res://"):
-		abs_path = ProjectSettings.globalize_path(path)
+	var abs_path := _resolve_project_path(path)
+	if abs_path.is_empty():
+		return {"status": "error", "error": "Path must stay inside res://"}
+	var content_size := content.to_utf8_buffer().size()
+	if content_size > MAX_FILE_BYTES:
+		return {"status": "error", "error": "File content exceeds the maximum size"}
 
 	# Ensure parent directory exists
 	DirAccess.make_dir_recursive_absolute(abs_path.get_base_dir())
@@ -803,7 +1074,7 @@ func _cmd_create_file(params: Dictionary) -> Dictionary:
 	file.store_string(content)
 	file.close()
 
-	return {"status": "ok", "data": {"path": path, "size": content.length()}}
+	return {"status": "ok", "data": {"path": path, "size": content_size}}
 
 
 func _cmd_read_file(params: Dictionary) -> Dictionary:
@@ -811,13 +1082,16 @@ func _cmd_read_file(params: Dictionary) -> Dictionary:
 	if path.is_empty():
 		return {"status": "error", "error": "Missing 'path' parameter"}
 
-	var abs_path := path
-	if path.begins_with("res://"):
-		abs_path = ProjectSettings.globalize_path(path)
+	var abs_path := _resolve_project_path(path)
+	if abs_path.is_empty():
+		return {"status": "error", "error": "Path must stay inside res://"}
 
 	var file := FileAccess.open(abs_path, FileAccess.READ)
 	if file == null:
 		return {"status": "error", "error": "Cannot read file: " + error_string(FileAccess.get_open_error())}
+	if file.get_length() > MAX_FILE_BYTES:
+		file.close()
+		return {"status": "error", "error": "File exceeds the maximum readable size"}
 
 	var content := file.get_as_text()
 	file.close()
@@ -829,9 +1103,9 @@ func _cmd_list_files(params: Dictionary) -> Dictionary:
 	var path: String = params.get("path", "res://")
 	var pattern: String = params.get("pattern", "")
 
-	var abs_path := path
-	if path.begins_with("res://"):
-		abs_path = ProjectSettings.globalize_path(path)
+	var abs_path := _resolve_project_path(path)
+	if abs_path.is_empty():
+		return {"status": "error", "error": "Path must stay inside res://"}
 
 	var dir := DirAccess.open(abs_path)
 	if dir == null:
@@ -844,6 +1118,9 @@ func _cmd_list_files(params: Dictionary) -> Dictionary:
 	var file_name := dir.get_next()
 	while file_name != "":
 		if not file_name.begins_with("."):
+			if files.size() + dirs.size() >= MAX_DIRECTORY_ENTRIES:
+				dir.list_dir_end()
+				return {"status": "error", "error": "Directory exceeds the maximum entry count"}
 			if dir.current_is_dir():
 				dirs.append(file_name)
 			elif pattern.is_empty() or file_name.match(pattern):
@@ -862,9 +1139,9 @@ func _cmd_delete_file(params: Dictionary) -> Dictionary:
 	if path.is_empty():
 		return {"status": "error", "error": "Missing 'path' parameter"}
 
-	var abs_path := path
-	if path.begins_with("res://"):
-		abs_path = ProjectSettings.globalize_path(path)
+	var abs_path := _resolve_project_path(path)
+	if abs_path.is_empty():
+		return {"status": "error", "error": "Path must stay inside res://"}
 
 	var err := DirAccess.remove_absolute(abs_path)
 	if err != OK:
@@ -880,6 +1157,8 @@ func _cmd_attach_script(params: Dictionary) -> Dictionary:
 
 	if node_path.is_empty() or script_path.is_empty():
 		return {"status": "error", "error": "Missing 'path' or 'script' parameter"}
+	if _resolve_project_path(script_path).is_empty():
+		return {"status": "error", "error": "Script path must stay inside res://"}
 
 	var node := get_tree().root.get_node_or_null(node_path)
 	if node == null:
@@ -911,6 +1190,8 @@ func _cmd_load_scene(params: Dictionary) -> Dictionary:
 	var path: String = params.get("path", "")
 	if path.is_empty():
 		return {"status": "error", "error": "Missing 'path' parameter"}
+	if _resolve_project_path(path).is_empty():
+		return {"status": "error", "error": "Scene path must stay inside res://"}
 
 	var err := get_tree().change_scene_to_file(path)
 	if err != OK:
@@ -929,6 +1210,8 @@ func _cmd_save_scene(params: Dictionary) -> Dictionary:
 		path = root.scene_file_path
 	if path.is_empty():
 		return {"status": "error", "error": "No path specified and scene has no file path"}
+	if _resolve_project_path(path).is_empty():
+		return {"status": "error", "error": "Scene path must stay inside res://"}
 
 	# Set owner on all descendants so they get saved
 	_set_owner_recursive(root, root)
@@ -1085,11 +1368,41 @@ func _cmd_wait_for(params: Dictionary, client: Dictionary, id: String) -> void:
 	var expr: String = params.get("expr", "")
 	var node_path: String = params.get("path", "")
 	var property: String = params.get("property", "")
-	var timeout: float = params.get("timeout", 10.0)
-	var interval: float = params.get("interval", 0.1)
+	var raw_timeout = params.get("timeout", 10.0)
+	var raw_interval = params.get("interval", 0.1)
 
 	if expr.is_empty() and (node_path.is_empty() or property.is_empty()):
 		_send(client, {"id": id, "status": "error", "error": "Provide 'expr' or 'path' + 'property'"})
+		return
+	if not (raw_timeout is int or raw_timeout is float):
+		_send(client, {"id": id, "status": "error", "error": "wait-for timeout must be numeric"})
+		return
+	if not (raw_interval is int or raw_interval is float):
+		_send(client, {"id": id, "status": "error", "error": "wait-for interval must be numeric"})
+		return
+	var timeout := float(raw_timeout)
+	var interval := float(raw_interval)
+	if is_nan(timeout) or is_inf(timeout) or timeout <= 0.0 or timeout > MAX_WAIT_TIMEOUT_SECONDS:
+		_send(client, {
+			"id": id,
+			"status": "error",
+			"error": "wait-for timeout must be greater than 0 and at most %.1f seconds" % MAX_WAIT_TIMEOUT_SECONDS,
+		})
+		return
+	if (
+		is_nan(interval)
+		or is_inf(interval)
+		or interval < MIN_WAIT_INTERVAL_SECONDS
+		or interval > MAX_WAIT_INTERVAL_SECONDS
+	):
+		_send(client, {
+			"id": id,
+			"status": "error",
+			"error": "wait-for interval must be between %.2f and %.1f seconds" % [MIN_WAIT_INTERVAL_SECONDS, MAX_WAIT_INTERVAL_SECONDS],
+		})
+		return
+	if _pending_waits.size() >= MAX_PENDING_WAITS:
+		_send(client, {"id": id, "status": "error", "error": "Maximum pending wait-for limit reached"})
 		return
 
 	var compiled_script: GDScript = null
@@ -1107,25 +1420,30 @@ func _cmd_wait_for(params: Dictionary, client: Dictionary, id: String) -> void:
 		if params.has("equals"):
 			description += " == " + str(params["equals"])
 
-	_pending_waits.append({
+	var pending_wait := {
 		"client": client,
 		"id": id,
 		"expr": expr,
 		"path": node_path,
 		"property": property,
-		"equals": params.get("equals"),
 		"timeout": timeout,
 		"interval": interval,
 		"script": compiled_script,
 		"description": description,
 		"start_ms": Time.get_ticks_msec(),
 		"last_check_ms": 0,
-	})
+	}
+	if params.has("equals"):
+		pending_wait["equals"] = params["equals"]
+	_pending_waits.append(pending_wait)
 
 # --- Assert ---
 
 func _cmd_assert(params: Dictionary) -> Dictionary:
-	var checks: Array = params.get("checks", [])
+	var raw_checks = params.get("checks", [])
+	if not raw_checks is Array:
+		return {"status": "error", "error": "assert checks must be an array"}
+	var checks: Array = raw_checks
 
 	# Support single expression shorthand
 	var expr: String = params.get("expr", "")
@@ -1138,6 +1456,14 @@ func _cmd_assert(params: Dictionary) -> Dictionary:
 
 	if checks.is_empty():
 		return {"status": "error", "error": "No checks provided. Use 'expr', 'path'+'property', or 'checks' array."}
+	if checks.size() > MAX_ASSERT_CHECKS:
+		return {
+			"status": "error",
+			"error": "assert supports at most %d checks per request" % MAX_ASSERT_CHECKS,
+		}
+	for check in checks:
+		if not check is Dictionary:
+			return {"status": "error", "error": "assert check entries must be objects"}
 
 	var results: Array = []
 	var all_passed := true
@@ -1457,6 +1783,142 @@ func _validate_cameras(cameras_2d: Array, cameras_3d: Array, warnings: Array) ->
 				"message": "Scene has Camera3D nodes but none is marked as current",
 			})
 
+
+# --- Optional FoveaCore automation contract ---
+
+func _probe_fovea_bridge() -> Dictionary:
+	if not ResourceLoader.exists(FOVEA_BRIDGE_PATH):
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_not_found",
+			"message": "FoveaCore automation bridge is not installed",
+		}
+	var bridge_script := load(FOVEA_BRIDGE_PATH) as Script
+	if bridge_script == null:
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_load_failed",
+			"message": "FoveaCore automation bridge could not be loaded",
+		}
+	var bridge := bridge_script.new() as RefCounted
+	if bridge == null or not bridge.has_method("contract"):
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_contract_missing",
+			"message": "FoveaCore automation bridge does not expose contract()",
+		}
+	var contract_value: Variant = bridge.call("contract")
+	if not contract_value is Dictionary:
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_contract_invalid",
+			"message": "FoveaCore automation contract must be a dictionary",
+		}
+	var contract: Dictionary = contract_value as Dictionary
+	if int(contract.get("version", -1)) != FOVEA_CONTRACT_VERSION:
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_version_mismatch",
+			"message": "Expected FoveaCore automation contract version %d" % FOVEA_CONTRACT_VERSION,
+			"contract": contract,
+		}
+	if contract.get("writes_files", true) != false \
+			or contract.get("starts_network_listener", true) != false:
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_security_contract_rejected",
+			"message": "FoveaCore bridge must not write files or start a network listener",
+			"contract": contract,
+		}
+	var operations_value: Variant = contract.get("operations", [])
+	if not operations_value is Array:
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_operations_invalid",
+			"message": "FoveaCore automation operations must be an array",
+			"contract": contract,
+		}
+	var operations: Array = operations_value as Array
+	for operation: String in ["status", "validate", "add_splat"]:
+		if operation not in operations:
+			return {
+				"ok": false,
+				"reason": "foveacore_bridge_operation_missing",
+				"message": "FoveaCore automation contract is missing operation: " + operation,
+				"contract": contract,
+			}
+	for method: String in ["status", "validate", "add_splat"]:
+		if not bridge.has_method(method):
+			return {
+				"ok": false,
+				"reason": "foveacore_bridge_method_missing",
+				"message": "FoveaCore automation bridge is missing method: " + method,
+				"contract": contract,
+			}
+	return {
+		"ok": true,
+		"bridge": bridge,
+		"contract": contract,
+	}
+
+
+func _call_fovea_bridge(method: String, arguments: Array) -> Dictionary:
+	var probe: Dictionary = _probe_fovea_bridge()
+	if not bool(probe.get("ok", false)):
+		return {
+			"status": "error",
+			"error": str(probe.get("message", "FoveaCore automation bridge is unavailable")),
+			"data": {
+				"available": false,
+				"compatible": false,
+				"reason": probe.get("reason", "foveacore_bridge_unavailable"),
+				"expected_contract_version": FOVEA_CONTRACT_VERSION,
+				"contract": probe.get("contract", null),
+			},
+		}
+	var bridge: RefCounted = probe["bridge"] as RefCounted
+	var result_value: Variant = bridge.callv(method, arguments)
+	if not result_value is Dictionary:
+		return {"status": "error", "error": "FoveaCore bridge returned an invalid response"}
+	var result: Dictionary = result_value as Dictionary
+	if not bool(result.get("ok", false)):
+		return {"status": "error", "error": str(result.get("error", "FoveaCore operation failed"))}
+	var data_value: Variant = result.get("data", {})
+	if not data_value is Dictionary:
+		return {"status": "error", "error": "FoveaCore bridge data must be a dictionary"}
+	var data: Dictionary = data_value as Dictionary
+	data["compatible"] = true
+	return {"status": "ok", "data": data}
+
+
+func _cmd_fovea_status(_params: Dictionary) -> Dictionary:
+	var result: Dictionary = _call_fovea_bridge("status", [get_tree(), MAX_SCENE_NODES])
+	if result.get("status") == "error" and result.has("data"):
+		# FoveaCore is optional: discovery remains a successful read-only probe.
+		return {"status": "ok", "data": result["data"]}
+	return result
+
+
+func _cmd_fovea_validate(_params: Dictionary) -> Dictionary:
+	var result: Dictionary = _call_fovea_bridge("validate", [get_tree(), MAX_SCENE_NODES])
+	if result.get("status") == "error" and result.has("data"):
+		var data: Dictionary = result["data"] as Dictionary
+		data["valid"] = false
+		data["complete"] = true
+		data["error_count"] = 1
+		data["warning_count"] = 0
+		data["errors"] = [{
+			"rule": str(data.get("reason", "foveacore_bridge_unavailable")),
+			"message": str(result.get("error", "FoveaCore automation bridge is unavailable")),
+		}]
+		data["warnings"] = []
+		return {"status": "ok", "data": data}
+	return result
+
+
+func _cmd_fovea_add_splat(params: Dictionary) -> Dictionary:
+	return _call_fovea_bridge("add_splat", [get_tree(), params])
+
 # --- Viewport Info ---
 
 func _cmd_viewport_info(_params: Dictionary) -> Dictionary:
@@ -1505,16 +1967,30 @@ func _cmd_visible_nodes(params: Dictionary) -> Dictionary:
 
 	var viewport_rect := get_viewport().get_visible_rect()
 	var visible_nodes: Array = []
-	_collect_visible_nodes(root, visible_nodes, type_filter, viewport_rect)
+	var traversal := {"visited": 0, "truncated": false}
+	_collect_visible_nodes(root, visible_nodes, type_filter, viewport_rect, 0, traversal)
 
 	return {"status": "ok", "data": {
 		"viewport": _serialize(viewport_rect),
 		"count": visible_nodes.size(),
 		"nodes": visible_nodes,
+		"visited_nodes": traversal["visited"],
+		"truncated": traversal["truncated"],
 	}}
 
 
-func _collect_visible_nodes(node: Node, result: Array, type_filter: String, viewport_rect: Rect2) -> void:
+func _collect_visible_nodes(
+	node: Node,
+	result: Array,
+	type_filter: String,
+	viewport_rect: Rect2,
+	depth: int,
+	traversal: Dictionary
+) -> void:
+	if int(traversal["visited"]) >= MAX_SCENE_NODES or depth > MAX_SCENE_TREE_DEPTH:
+		traversal["truncated"] = true
+		return
+	traversal["visited"] = int(traversal["visited"]) + 1
 	var is_visible := true
 	var in_viewport := true
 
@@ -1547,7 +2023,12 @@ func _collect_visible_nodes(node: Node, result: Array, type_filter: String, view
 			elif node is Node3D:
 				entry["global_position"] = _serialize((node as Node3D).global_position)
 			result.append(entry)
+			if result.size() >= MAX_VISIBLE_NODES:
+				traversal["truncated"] = true
+				return
 
 	# Always recurse — children might be in viewport even if parent position is outside
 	for child in node.get_children():
-		_collect_visible_nodes(child, result, type_filter, viewport_rect)
+		if bool(traversal["truncated"]):
+			break
+		_collect_visible_nodes(child, result, type_filter, viewport_rect, depth + 1, traversal)

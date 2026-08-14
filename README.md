@@ -1,351 +1,472 @@
 # Ultimate Odycer Godot Runtime CLI
 
-> Hardened local fork of [mattias800/godot-cli](https://github.com/mattias800/godot-cli).
-> It is a development/testing tool, not a gameplay dependency. The fork uses
-> the `uo-godot-cli` executable to avoid the unrelated `godot-cli` npm package.
+Hardened, local-only runtime control for Godot 4.7 — built for coding agents and deterministic development workflows.
 
-A CLI tool for controlling the Godot game engine — like [Playwright](https://playwright.dev/), but for games.
+> [!CAUTION]
+> This is a **development and testing control plane**, not a gameplay dependency or a production API. The addon refuses release builds and remote network binds.
 
-Designed for **coding agents** (like Claude Code) to programmatically build, inspect, test, and verify Godot games at runtime. Connects to a running Godot 4.6+ game via TCP and provides 29 commands for full control.
+This repository is Ultimate Odycer's security-focused fork of [mattias800/godot-cli](https://github.com/mattias800/godot-cli). It pairs a Node.js CLI with a Godot addon so an agent or developer can inspect, test, capture, and—only when explicitly enabled—modify a running game.
 
-## How it works
+> [!TIP]
+> **Explore the broader project:** [Ultimate Odycer official website](https://www.ultimateodycer.com/) · [Version française](https://www.ultimateodycer.com/fr/)
+>
+> The public site presents the self-hosted Zig backend, persistent-world vision, Godot integration path, and studio context that this development CLI supports.
 
-Two components:
+The executable is named **`uo-godot-cli`** to avoid colliding with the unrelated `godot-cli` package from [IvanMurzak/Godot-MCP](https://github.com/IvanMurzak/Godot-MCP).
 
-1. **Godot addon** — A TCP server that runs inside your game as an autoload, accepting JSON commands
-2. **CLI tool** — A Node.js client that sends commands and prints JSON results
+## Why this fork
 
+- **Safe by default:** authenticated, loopback-only, debug-only, and read-only at startup.
+- **Fail-closed compatibility:** `doctor` verifies the protocol, addon version, Godot 4.7 runtime, endpoint, limits, and capability gates.
+- **Deterministic output:** commands return structured JSON and non-zero exit codes on failed gates or assertions.
+- **Bounded inspection:** scene traversal, files, messages, responses, clients, waits, and assertions have explicit limits.
+- **No silent activation:** the installer never edits `project.godot` or enables the plugin/autoload.
+- **Project-aware preflight:** local discovery and static checks run without starting Godot or requiring a runtime token.
+- **Catalog compatibility audit:** compares the bundled CLI manifest with the installed `godot_ai` catalog and requires review for every missing or unmapped capability.
+- **Strict process ownership:** managed start, status, logs, and stop verify the token, executable, PID, and a random instance marker.
+- **One-shot scene proof:** loads one bounded scene in safe mode, checks structure and logs, fingerprints source files, then stops the owned runtime.
+- **Optional FoveaCore bridge:** validated splat discovery and live-scene insertion without saving the scene.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    User["Developer or coding agent"] --> CLI["uo-godot-cli<br/>Node.js 18+"]
+
+    CLI -->|"bounded local commands"| Local["Project discovery,<br/>preflight, addon installer"]
+    Local --> Files["Godot project files"]
+    Local --> Catalogs["CLI + godot_ai<br/>capability catalogs"]
+
+    CLI -->|"owned lifecycle"| Supervisor["Runtime supervisor<br/>PID + executable + marker"]
+    Supervisor -->|"launch / verify / graceful stop"| Runtime
+    Supervisor --> State["Token verifier + bounded logs<br/>outside the project"]
+
+    CLI -->|"one-shot proof"| Validator["Scene validator<br/>structure + logs + fingerprints"]
+    Validator --> Supervisor
+
+    CLI -->|"TCP + newline-delimited JSON<br/>token required"| Addon["GodotCLI addon<br/>127.0.0.1:9900"]
+    Addon --> Runtime["Godot 4.7<br/>debug runtime"]
+
+    Gates{"Capability gates"} -->|"default"| ReadOnly["read-only"]
+    Gates -->|"ALLOW_MUTATIONS=1"| Mutating["runtime mutation"]
+    Gates -->|"ALLOW_UNSAFE=1"| Unsafe["eval and file writes"]
+    ReadOnly --> Addon
+    Mutating --> Addon
+    Unsafe --> Addon
 ```
-┌─────────────┐     TCP/JSON     ┌──────────────────┐
-│ uo-godot-cli │ ──────────────> │  Godot Game       │
-│  (Node.js)   │ <────────────── │  (cli_server.gd)  │
-└─────────────┘   localhost:9900 └──────────────────┘
-```
 
-## Setup
+The runtime addon exposes 34 protocol commands. `uo-godot-cli commands` returns the live catalog, category, availability, and required gate; treat that response—not a static README list—as the compatibility boundary.
 
-### 1. Build the local CLI
+## Requirements
+
+- Godot **4.7.x** debug build; public CI uses **4.7.1 stable** and the full
+  local Fovea integration gate currently uses **4.7-dev5**.
+- Node.js **18 or newer**.
+- A fresh `GODOT_CLI_TOKEN` containing at least 32 characters.
+- The same token environment must be present when Godot starts and when the CLI connects.
+
+## Quick start
+
+### 1. Build the local executable
 
 ```bash
-npm install
+npm ci
 npm run build
 npm link
+uo-godot-cli --version
 ```
 
-The examples below retain the upstream `godot-cli` spelling for readability.
-For this fork, replace that executable with `uo-godot-cli`; invoking the bare
-`godot-cli` command may run the unrelated Godot-MCP npm package installed on
-the workstation.
+> [!IMPORTANT]
+> Do not replace `uo-godot-cli` with the bare `godot-cli` command on a workstation that has Godot-MCP installed; that can invoke a different product with a different protocol and security model.
 
-### Security prerequisites
+### 2. Inspect the target project
 
-Set a fresh token of at least 32 characters **before launching Godot** and in
-the terminal running the CLI:
+These commands are local and read-only. They do not start Godot, connect to a runtime, or require a token.
+
+```bash
+uo-godot-cli project discover /path/to/game
+uo-godot-cli project info /path/to/game
+uo-godot-cli project preflight /path/to/game
+```
+
+`project preflight` checks the Ultimate Odycer contract: Godot 4.7, Forward+, C#, a main scene, plugin state, the bundled addon, and bounded resource references. It exits non-zero when an error-level check fails or the scan is incomplete.
+
+### 3. Preview and install the addon
+
+```bash
+uo-godot-cli addon status /path/to/game
+uo-godot-cli addon install /path/to/game --dry-run
+uo-godot-cli addon install /path/to/game
+```
+
+The installer copies only `addons/godot_cli`, verifies its files, and refuses to overwrite a divergent installation unless `--force` is explicit. It does **not** enable the plugin or modify `project.godot`.
+
+### 4. Create a session token
+
+PowerShell:
 
 ```powershell
-$env:GODOT_CLI_TOKEN = '<fresh-random-token>'
+$uoTokenBytes = New-Object byte[] 32
+$uoTokenRng = [Security.Cryptography.RandomNumberGenerator]::Create()
+try { $uoTokenRng.GetBytes($uoTokenBytes) } finally { $uoTokenRng.Dispose() }
+$env:GODOT_CLI_TOKEN = -join ($uoTokenBytes | ForEach-Object { $_.ToString('x2') })
 ```
 
-The server binds only to `127.0.0.1`, refuses release builds, limits message
-and file sizes, caps concurrent clients at eight, expires unauthenticated
-connections after two seconds, bounds scene traversal/assertion batches, and
-starts in read-only mode. The client revalidates
-`localhost` DNS answers, caps outgoing requests, decodes split UTF-8 safely,
-and verifies each response ID and status. Optional capabilities must be
-enabled before launching Godot:
-
-```powershell
-$env:GODOT_CLI_ALLOW_MUTATIONS = '1' # scene/runtime mutations and input
-$env:GODOT_CLI_ALLOW_UNSAFE = '1'    # eval, method calls, script/file writes
-```
-
-See [SECURITY.md](SECURITY.md) for the enforced boundary.
-
-### Compatibility doctor
-
-Run the authenticated compatibility gate after Godot starts:
+Bash:
 
 ```bash
-uo-godot-cli doctor
+export GODOT_CLI_TOKEN="$(openssl rand -hex 32)"
 ```
 
-It fails closed unless the addon version and protocol match, Godot 4.7 is
-running as a debug build on loopback, and mutation/unsafe gates are disabled.
-For an intentionally elevated development session, acknowledge that state:
+Create a new token for each development session. Never commit it or place it in a shared project configuration.
 
-```bash
-uo-godot-cli doctor --allow-elevated
-```
+### 5. Enable and run in Godot
 
-### Validation status
+From the same environment that contains the token:
 
-The P0 suite (version `0.1.0-uo.4`) passes 29/29 checks: seven isolated installer/status
-controls, the Node protocol and security invariant controls, and four headless
-runtime scenarios with Godot 4.7-dev5 against the isolated addon fixture. `validate-scene`
-is fail-closed: it enforces a 4,096-node and 64-depth budget, returning `complete: false`,
-`valid: false`, and a `validation_budget_exceeded` error when truncated. This is a real
-CLI/addon protocol proof, not yet proof of integration into the canonical Ultimate Odycer
-client; that step remains `[Scaffolding / Proxy]`.
+1. Open the project in Godot.
+2. Go to **Project → Project Settings → Plugins**.
+3. Enable **GodotCLI**.
+4. Run the project as a debug build.
 
-### 2. Inspect and install the Godot addon
+Expected startup message:
 
-Inspect the project first. This command is read-only and does not require the
-runtime token:
-
-```bash
-uo-godot-cli addon status /path/to/your/godot-project
-```
-
-Preview the installation, then apply it after reviewing the JSON result:
-
-```bash
-uo-godot-cli addon install /path/to/your/godot-project --dry-run
-uo-godot-cli addon install /path/to/your/godot-project
-```
-
-The installer requires a real `project.godot`, copies only into
-`addons/godot_cli`, verifies the bundled files, and does not edit or enable
-anything in `project.godot`. An existing modified copy is refused unless
-`--force` is explicitly supplied. If `godot_ai` is active, status reports the
-overlapping-control-plane warning before activation.
-
-### 3. Enable the plugin
-
-In Godot: **Project → Project Settings → Plugins** → Enable **GodotCLI**
-
-### 4. Run your game
-
-The TCP server starts automatically when the game runs. You'll see:
-```
+```text
 GodotCLI: Server listening on 127.0.0.1:9900 (read-only mode)
 ```
 
-## Commands
-
-### Scene tree
+After the addon autoload is enabled, the CLI can alternatively own the local
+Godot process and its logs:
 
 ```bash
-# Get the full scene tree
-godot-cli scene-tree
-
-# Get tree from a specific root, limited depth
-godot-cli scene-tree --root /root/Main --depth 3
-
-# Load a different scene
-godot-cli load-scene res://levels/level2.tscn
-
-# Save the current scene
-godot-cli save-scene --path res://scenes/modified.tscn
+uo-godot-cli --port 9900 runtime start /path/to/game --godot /path/to/godot
 ```
 
-### Node inspection & mutation
+The managed start defaults to headless safe mode and waits for authenticated
+readiness. It does not edit or enable the addon.
+
+### 6. Verify the live boundary
 
 ```bash
-# Get all properties of a node
-godot-cli get-node /root/Main/Player
-
-# Set a property
-godot-cli set-property /root/Main/Player position "Vector2(100, 200)"
-godot-cli set-property /root/Main/Player visible false
-godot-cli set-property /root/Main/Player speed 300
-
-# Add a new node
-godot-cli add-node /root/Main Sprite2D --name Enemy
-godot-cli add-node /root/Main CharacterBody2D --name Player \
-  --props '{"position": "Vector2(400, 300)"}'
-
-# Remove, rename, reparent
-godot-cli remove-node /root/Main/OldNode
-godot-cli rename-node /root/Main/Sprite2D Player
-godot-cli reparent-node /root/Main/Weapon /root/Main/Player
-
-# Call a method
-godot-cli call-method /root/Main/Player take_damage 25
+uo-godot-cli wait-for-ready --timeout 30 --interval 250
+uo-godot-cli doctor
+uo-godot-cli commands
+uo-godot-cli scene-tree --depth 3
 ```
 
-### Scripts
+`doctor` rejects protocol/addon mismatches, non-4.7 engines, release builds, non-loopback endpoints, unexpected limits, or elevated gates. Use `doctor --allow-elevated` only when you intentionally enabled a mutation or unsafe session.
+
+## Security modes
+
+| Mode | Environment | Typical capabilities |
+|---|---|---|
+| Read-only | Default | Inspect nodes and files, structured assertions, validation, readiness, metrics, screenshots |
+| Mutating | `GODOT_CLI_ALLOW_MUTATIONS=1` | Change the live scene, simulate input, load scenes, add an unsaved Fovea splat |
+| Unsafe | `GODOT_CLI_ALLOW_UNSAFE=1` | Evaluate GDScript, call methods, attach scripts, save scenes, create/delete project files |
+
+Environment gates are read when Godot starts. Restart Godot after changing one.
+
+> [!WARNING]
+> Expression-based `assert` and `wait-for` variants execute GDScript and therefore require the unsafe gate. Their structured node/property forms remain available in read-only mode.
+
+See [SECURITY.md](SECURITY.md) for the complete threat boundary and enforced limits.
+
+## Command guide
+
+### Local project and addon commands
 
 ```bash
-# Attach a script to a node
-godot-cli attach-script /root/Main/Player res://scripts/player.gd
-
-# Detach script
-godot-cli detach-script /root/Main/Player
+uo-godot-cli project discover [start]
+uo-godot-cli project info [start]
+uo-godot-cli project preflight [start]
+uo-godot-cli project compatibility [start] [--live] [--mcp-port 8000]
+uo-godot-cli addon status <project>
+uo-godot-cli addon install <project> [--dry-run] [--force]
 ```
 
-### Execute GDScript
+Without `--live`, `project compatibility` is local and tokenless. It compares
+bounded, hashed CLI and installed `godot_ai` catalogs by semantic capability
+family and emits advisory `cli_runtime`, `mcp_editor`, or context-dependent
+routing. Missing, unexpected, oversized, inconsistent, or partially exposed
+entries return `review_required`; routing never grants authorization and a
+shared family is not a claim that both control planes are behaviorally identical.
+
+`--live` additionally requires `GODOT_CLI_TOKEN`, verifies the local
+`godot-ai` identity, reads the authenticated CLI command gates, and lists the
+MCP tools with bounded JSON/SSE pagination. It never enables a gate or invokes
+an MCP tool.
+
+### Managed runtime
 
 ```bash
-# Single expression (auto-returns the result)
-godot-cli eval "get_tree().current_scene.name"
-godot-cli eval "get_node('/root/Main/Player').position"
-
-# Multi-line code
-godot-cli eval "var p = get_node('/root/Main/Player')
-p.position = Vector2(100, 200)
-return p.position"
+uo-godot-cli --port 9900 runtime start [project] --godot /path/to/godot
+uo-godot-cli runtime status [project]
+uo-godot-cli runtime logs [project] --lines 200 --bytes 65536
+uo-godot-cli runtime stop [project] --timeout 10
 ```
 
-### Input simulation
+`runtime start` requires Godot 4.7, the exact bundled addon, its explicit
+autoload, a free loopback port, and `GODOT_CLI_TOKEN`. It clears inherited
+mutation/unsafe gates; use `--allow-mutations` or `--allow-unsafe` only for an
+intentional elevated session. `--mode editor` and `--mode game` request visible
+development modes, while `--no-wait` returns after ownership registration.
+
+The registry and combined stdout/stderr logs are outside the project under the
+operating-system temporary directory. Set `UO_GODOT_CLI_STATE_DIR` to choose a
+different regular directory. Five logs are retained per project. The token is
+never stored or placed in process arguments: only its SHA-256 verifier is kept.
+`runtime stop` refuses to signal a PID unless the token, canonical executable,
+and random command-line marker all match. There is no force-kill command.
+
+### One-shot scene validation
 
 ```bash
-# Mouse click
-godot-cli click 400 300
-godot-cli click 400 300 --button right
-
-# Key press
-godot-cli press-key Space
-godot-cli press-key A --shift
-godot-cli press-key S --ctrl
-
-# Mouse move
-godot-cli mouse-move 500 400
+uo-godot-cli --port 9900 scene validate res://scenes/Main.tscn \
+  --project /path/to/game --godot /path/to/godot
 ```
 
-### Screenshots
+`scene validate` accepts only a regular `.tscn` or `.scn` inside the discovered
+project, limited to 64 MiB. It starts an owned headless runtime in safe mode,
+runs `doctor` and structural validation, classifies bounded Godot log errors,
+fingerprints the scene and `project.godot`, and stops the runtime. The result is
+valid only when every stage is complete, both fingerprints are unchanged, and
+the logs contain no hard error. Godot may still update generated `.godot`
+import/cache data; this command is not GPU, visual-quality, or OpenXR proof.
+`valid: false, complete: true` means the full proof ran and found a structural
+defect; `complete: false` means the validation evidence itself is incomplete.
+
+### Project test profiles
 
 ```bash
-# Capture to file (default: screenshot.png)
-godot-cli screenshot
-godot-cli screenshot --output gameplay.png
+uo-godot-cli test list /path/to/game --godot /path/to/godot
+uo-godot-cli test run shaderforge-profile /path/to/game --godot /path/to/godot
 ```
 
-### File operations
+`test list` reads `.uo-godot-tests.json` without running project code and
+reports each profile's entry and dependency availability. `test run` accepts
+only a declared profile and supports four direct runners: `godot_scene`,
+`godot_script`, `python`, and `dotnet_test`. It never invokes a shell. Godot
+profiles always run headless with XR disabled, while Python and .NET execute
+the exact in-project `.py` or `.csproj` entry from the manifest.
+
+The schema is versioned and rejects unknown fields, duplicate IDs, traversal,
+symbolic entry paths, unsupported extensions, unknown placeholders, excessive
+arguments, and timeouts above 900 seconds. `${projectRoot}` and `${godotBin}`
+are the only argument placeholders. Output is capped at 1 MiB; timeout or
+output overflow stops only the owned child and returns incomplete evidence.
+The child receives a reduced environment without `GODOT_CLI_TOKEN` or runtime
+mutation gates. Because project-defined tests may legitimately generate cache,
+reports fingerprint the manifest and entry file but explicitly label the
+project-wide mutation audit as not performed.
+
+The canonical Ultimate Odycer client currently declares six profiles:
+`city-runtime`, `scene-contract-static`, `scene-validator-unit`,
+`shaderforge-full`, `shaderforge-profile`, and `vr-headless`. Availability does
+not imply success: `scene-validator-unit` proves nested-project isolation with
+four regression tests, while `scene-contract-static` still returns three real
+collision findings and one `load_steps` warning with a failing exit code.
+
+### Readiness and discovery
 
 ```bash
-# Create a script file in the project
-godot-cli create-file res://scripts/enemy.gd --content "extends CharacterBody2D
-
-var speed = 100.0
-
-func _physics_process(delta):
-    velocity = Vector2(speed, 0)
-    move_and_slide()"
-
-# Read a file
-godot-cli read-file res://scripts/player.gd
-
-# List project files
-godot-cli list-files res://scripts --pattern "*.gd"
-
-# Delete a file
-godot-cli delete-file res://scripts/old_script.gd
+uo-godot-cli ping
+uo-godot-cli wait-for-ready --timeout 30 --interval 250
+uo-godot-cli doctor
+uo-godot-cli commands
 ```
 
-### Class info
+`wait-for-ready` bounds the total wait to 300 seconds and polling intervals to 50–5,000 milliseconds.
+
+### Inspect the running game
 
 ```bash
-# List all instantiable classes
-godot-cli list-classes --filter Sprite
-godot-cli list-classes --base Node2D
-
-# Get full class info (properties, methods, signals)
-godot-cli class-info CharacterBody2D
+uo-godot-cli scene-tree --root /root/Main --depth 3
+uo-godot-cli get-node /root/Main/Player
+uo-godot-cli visible-nodes --type Control
+uo-godot-cli viewport-info
+uo-godot-cli validate-scene
+uo-godot-cli screenshot --output gameplay.png
 ```
 
-### Verification & testing
+`validate-scene` is fail-closed. Traversal is limited to 4,096 nodes and depth 64; truncation returns `complete: false`, `valid: false`, and `validation_budget_exceeded`.
 
-These commands enable coding agents to verify their work:
+### Structured checks
 
 ```bash
-# Wait for a condition (polls until true or timeout)
-godot-cli wait-for "get_node('/root/Main/Player').is_on_floor()" --timeout 5
-godot-cli wait-for --path /root/Main/Player --property is_on_floor --timeout 3
-
-# Assert game state (exit code 1 on failure)
-godot-cli assert "get_tree().current_scene.name == 'Main'"
-godot-cli assert --path /root/Main/Player --property visible --equals true
-godot-cli assert --path /root/Main/Player --property health --greater-than 0
-godot-cli assert --exists /root/Main/HUD
-godot-cli assert --not-exists /root/Main/GameOverScreen
-
-# Batch assertions
-godot-cli assert --checks '[
-  {"expr": "get_tree().current_scene.name == \"Main\""},
-  {"path": "/root/Main/Player", "property": "visible", "equals": true},
-  {"exists": "/root/Main/HUD"}
+uo-godot-cli assert --exists /root/Main/HUD
+uo-godot-cli assert --path /root/Main/Player --property visible --equals true
+uo-godot-cli wait-for --path /root/Main/Player --property is_on_floor --equals true
+uo-godot-cli assert --checks '[
+  {"exists":"/root/Main/HUD"},
+  {"path":"/root/Main/Player","property":"health","greater_than":0}
 ]'
-
-# Structural validation (checks physics shapes, cameras, sprites, etc.)
-godot-cli validate-scene
-
-# Performance & rendering info
-godot-cli viewport-info
-
-# What's visible on screen right now
-godot-cli visible-nodes
-godot-cli visible-nodes --type Control
-godot-cli visible-nodes --type Sprite2D
 ```
 
-## Example: agent workflow
+Batch assertions are limited to 256 checks per request.
 
-A coding agent building a platformer might do this:
+### Gated runtime changes
+
+Requires `GODOT_CLI_ALLOW_MUTATIONS=1` before Godot starts:
 
 ```bash
-# 1. Create a player script
-godot-cli create-file res://player.gd --content "extends CharacterBody2D
-const SPEED = 300.0
-const JUMP_VELOCITY = -400.0
-
-func _physics_process(delta):
-    if not is_on_floor():
-        velocity += get_gravity() * delta
-    if Input.is_action_just_pressed('ui_accept') and is_on_floor():
-        velocity.y = JUMP_VELOCITY
-    var direction = Input.get_axis('ui_left', 'ui_right')
-    velocity.x = direction * SPEED
-    move_and_slide()"
-
-# 2. Build the scene tree
-godot-cli add-node /root/Main CharacterBody2D --name Player
-godot-cli add-node /root/Main/Player CollisionShape2D --name Collision
-godot-cli add-node /root/Main/Player Sprite2D --name Sprite
-godot-cli attach-script /root/Main/Player res://player.gd
-
-# 3. Validate the scene structure
-godot-cli validate-scene
-
-# 4. Take a screenshot to visually verify
-godot-cli screenshot --output after_setup.png
-
-# 5. Test: press jump key and verify player moves up
-godot-cli press-key Space
-godot-cli wait-for "get_node('/root/Main/Player').velocity.y < 0" --timeout 1
-godot-cli assert --path /root/Main/Player --property velocity --less-than 0
-
-# 6. Check performance
-godot-cli viewport-info
+uo-godot-cli set-property /root/Main/Player visible false
+uo-godot-cli add-node /root/Main Sprite2D --name Marker
+uo-godot-cli reparent-node /root/Main/Marker /root/Main/HUD
+uo-godot-cli load-scene res://levels/level2.tscn
+uo-godot-cli press-key Space
 ```
 
-## Configuration
+### Unsafe operations
 
-**Port**: Default is `9900`. Override via command line when launching Godot:
+Requires `GODOT_CLI_ALLOW_UNSAFE=1` before Godot starts:
 
 ```bash
-godot --godot-cli-port=8080
+uo-godot-cli eval "get_tree().current_scene.name"
+uo-godot-cli call-method /root/Main/Player take_damage 25
+uo-godot-cli attach-script /root/Main/Player res://scripts/player.gd
+uo-godot-cli create-file res://scripts/generated.gd --content "extends Node"
+uo-godot-cli save-scene --path res://scenes/modified.tscn
 ```
 
-Or in the CLI:
+File operations are confined to `res://`; individual files are limited to 4 MiB.
+
+Run `uo-godot-cli --help` or `uo-godot-cli <command> --help` for the complete syntax.
+
+## Optional FoveaCore bridge
+
+When a compatible FoveaCore addon is installed, discovery and validation remain read-only:
 
 ```bash
-godot-cli --port 8080 scene-tree
+uo-godot-cli fovea status
+uo-godot-cli fovea validate
 ```
 
-## Value formats
+Adding a splat requires the mutation gate and an existing `.fovea`, `.ply`, or `.splat` asset inside `res://`:
 
-When setting properties, you can use:
+```bash
+uo-godot-cli fovea add /root/Main res://assets/garden.ply \
+  --name GardenSplat --quality balanced --opacity 0.85
+```
 
-- **JSON primitives**: `true`, `42`, `3.14`, `"hello"`
-- **Godot expressions**: `"Vector2(100, 200)"`, `"Color(1, 0, 0, 1)"`, `"Rect2(0, 0, 64, 64)"`
-- **Typed JSON objects**: `'{"_type": "Vector2", "x": 100, "y": 200}'`
+The node is added only to the live scene. Saving remains a separate unsafe operation. `--collisions` is accepted only for native `.fovea` sources, while `--dynamic` opts out of the default static-asset behavior.
 
-## Target
+The bridge is deterministic and provider-neutral: it does not call Gemini or any other model.
 
-- **Godot 4.7** (automated headless validation with 4.7-dev5; inherited
-  upstream compatibility starts at 4.6)
-- **Node.js 18+**
+## Configuration and limits
+
+| Setting | Default / limit |
+|---|---|
+| Bind address | `127.0.0.1` only |
+| Port | `9900` |
+| Token | 32+ characters |
+| Concurrent clients | 8 |
+| Unauthenticated timeout | 2 seconds |
+| Request / message | 1 MiB |
+| Response | 16 MiB |
+| Project file | 4 MiB per file |
+| Scene traversal | 4,096 nodes, depth 64 |
+| Visible-node output | 4,096 nodes |
+| Pending waits | 8, up to 300 seconds each |
+| Static project scan | 20,000 files, 128 MiB total, 256 reported issues |
+| Managed log read | 1 MiB, 2,000 lines |
+| Managed log retention | 5 files per project |
+| Graceful managed stop | 30 seconds maximum; no force kill |
+| One-shot scene source | 64 MiB; regular in-project `.tscn` or `.scn` |
+| Scene log diagnostics | 256 errors and 64 warning samples |
+| Test manifest | 256 KiB, schema version 1, 128 profiles |
+| Test profile arguments | 32 arguments, 1 KiB each, 8 KiB total |
+| Test profile execution | 900 seconds and 1 MiB captured output maximum |
+
+Override the port on both sides:
+
+```bash
+godot --godot-cli-port=9910
+uo-godot-cli --port 9910 doctor
+```
+
+Only loopback hosts are accepted. `localhost` is resolved and revalidated before each connection.
+
+## Validation evidence
+
+| Gate | Result | Proof boundary |
+|---|---|---|
+| Default `npm test`, 2026-08-14 | **69 passed, 0 failed, 14 skipped** out of 83 | Build, Node protocol, compatibility catalog, installer, package consumer, project preflight, readiness, security invariants, managed-process controls, test-profile positives/negatives, and local scene-validation negatives. Real Godot and Fovea scenarios were explicitly skipped. |
+| Godot 4.7-dev5 local integration gate, 2026-08-14 | **82 passed, 0 failed, 1 skipped** out of 83 | Real headless Godot protocol, managed lifecycle, clean/structural/parse-error scene proofs, and a real `godot_script` test profile. Only the cross-repository FoveaEngine scenario was skipped. |
+| Fully configured local integration gate, 2026-08-14 | **83 passed, 0 failed, 0 skipped** with Godot 4.7-dev5 and the local FoveaEngine checkout | CLI/addon runtime, compatibility fail-closed controls, managed-process lifecycle, bounded test profiles, clean/error scene validation, and a temporary one-splat Fovea project; not GPU, visual-quality, production, or OpenXR proof. |
+| Canonical test catalog, 2026-08-14 | **6/6 profiles available**; `shaderforge-profile` passed; `scene-validator-unit` passed 4/4; `scene-contract-static` failed closed with 3 errors and 1 warning | Real Godot 4.7-dev5 execution for ShaderForge plus Python positive and negative controls. Nested standalone roots are now isolated; availability is not proof that every profile passes. |
+| Canonical compatibility audit, 2026-08-14 | **`ok`, complete**: 34 CLI commands and 43 installed `godot_ai` tools, with no missing or unmapped entries | Static catalog comparison by semantic families only; not runtime availability, behavioral equivalence, or permission equivalence. |
+| Canonical `Login.tscn` harness, 2026-08-09 | `doctor` passed; 168 nodes visited; no logged parse/script errors; `project.godot` unchanged | Opt-in, non-persistent read-only harness. The addon remains disabled while `godot_ai` is the active control plane. |
+| Canonical static preflight, 2026-08-14 | Correctly failed closed | Found four hard and 375 soft missing references, a 1.51 GB scene outside the scan budget, and an installed but divergent/inactive addon while `godot_ai` remains active. This is evidence of detection, not project readiness. |
+
+The public CI repeats the portable suite on Node.js 18 and 22, then downloads the official Godot 4.7.1 Linux archive, verifies its SHA-256 digest, and runs the real runtime suite. The cross-repository Fovea test remains a separate local gate until FoveaCore is public. Managed-runtime tests use temporary projects and state directories and leave `project.godot` byte-identical.
+
+The 2026-08-14 fully configured rerun used `4.7.dev5.mono.official.a8643700c`.
+All 83 tests ran, including the real clean-scene proof, its parse-error negative
+control, and a real manifest-driven Godot profile. The FoveaEngine worktree
+status was identical before and after the suite, and no managed Godot process
+remained.
+
+Pre-release packages use the npm `next` distribution tag through
+`publishConfig`; they must not replace `latest` before a stable release is
+explicitly approved.
+
+To run the configured integration tests:
+
+PowerShell:
+
+```powershell
+$env:GODOT_BIN = 'C:\path\to\Godot_v4.7-dev5_mono_win64.exe'
+$env:FOVEA_PROJECT_ROOT = 'F:\foveaengine\fovea-engine'
+npm test
+```
+
+Bash:
+
+```bash
+GODOT_BIN=/path/to/godot \
+FOVEA_PROJECT_ROOT=/path/to/fovea-engine \
+npm test
+```
+
+Headless Godot can exit successfully while still logging a script or resource error. Runtime validation must therefore scan the complete log for `ERROR:`, `SCRIPT ERROR`, parse failures, and load failures; an exit code alone is not sufficient proof.
+
+## Current boundaries
+
+- Persistent activation in the canonical Ultimate Odycer client remains **`[Scaffolding / Proxy]`** while `godot_ai` is enabled; two control planes require distinct ports and tokens.
+- Canonical `scene validate` is currently ineligible: the installed GodotCLI copy differs from the bundled addon and its plugin/autoload is disabled. No automatic replacement or activation is performed.
+- The same-day canonical `Login.tscn` replay is not promoted because the client reports missing planet, generated-building, and audio resources plus invalid UIDs independently of this addon.
+- Static UID discovery cannot validate Godot's binary UID cache; a real runtime scene-load gate is still required.
+- The Fovea GDScript fallback proves the bridge contract, not native extension, GPU rendering, visual quality, collision quality, or OpenXR behavior.
+- This branch does not ship the unbounded stdio MCP prototype found on other branches. Shell commands and the authenticated TCP protocol remain the supported interfaces.
+
+## Troubleshooting
+
+**`GODOT_CLI_TOKEN must contain at least 32 characters`**
+
+Create a fresh token, export it before starting Godot, and use the same environment for the CLI.
+
+**`doctor` rejects elevated gates**
+
+Restart Godot without mutation/unsafe flags, or explicitly acknowledge the intended development session with `doctor --allow-elevated`.
+
+**Connection refused on port 9900**
+
+Confirm the plugin is enabled, the project is running as a debug build, the token was present at launch, and both sides use the same port.
+
+**`godot-cli` shows different commands**
+
+Run `uo-godot-cli --version`. The bare executable may resolve to Godot-MCP rather than this fork.
+
+**Addon install refuses an existing copy**
+
+Inspect `uo-godot-cli addon status <project>`. Use `--force` only after reviewing the reported divergence.
 
 ## License
 
-MIT
+MIT. This security-focused fork is based on
+[mattias800/godot-cli](https://github.com/mattias800/godot-cli); see
+[`LICENSE`](LICENSE) for the full terms.
+
+Contributions should preserve the local-only, authenticated, fail-closed
+boundary described in [`SECURITY.md`](SECURITY.md). See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the validation gates.
