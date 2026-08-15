@@ -1,16 +1,34 @@
 {
-  "name": "godot-cli",
-  "version": "0.1.0",
-  "description": "CLI tool for controlling Godot game engine - like Playwright, but for games",
+  "name": "@ultimate-odycer/godot-runtime-cli",
+  "version": "0.1.0-uo.7",
+  "description": "Hardened, local-only runtime CLI for Ultimate Odycer Godot development",
+  "keywords": [
+    "godot",
+    "cli",
+    "automation",
+    "testing",
+    "coding-agents",
+    "gaussian-splatting"
+  ],
   "type": "module",
   "bin": {
-    "godot-cli": "./dist/src/cli.js",
-    "godot-cli-mcp": "./dist/src/mcp-cli.js"
+    "uo-godot-cli": "dist/cli.js"
   },
+  "files": [
+    "dist/",
+    "godot-addon/addons/godot_cli/",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "npm run build && node --test dist/tests/*.test.js"
+    "prepack": "npm run build",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:godot": "npm run build && node --test test/godot-smoke.test.mjs"
   },
   "dependencies": {
     "commander": "^13.1.0"
@@ -22,5 +40,17 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zedarvates/godot-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zedarvates/godot-cli/issues"
+  },
+  "homepage": "https://github.com/zedarvates/godot-cli#readme",
   "license": "MIT"
 }

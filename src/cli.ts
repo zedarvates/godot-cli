@@ -2,22 +2,47 @@
 
 import { Command } from "commander";
 import { GodotClient, type GodotResponse } from "./client.js";
-import { runMcpServer } from "./mcp.js";
+import { inspectAddon, installAddon } from "./addon.js";
+import {
+  buildDoctorReport,
+  CLI_VERSION,
+  MAX_ASSERT_CHECKS,
+  MAX_SCENE_TREE_DEPTH,
+} from "./doctor.js";
+import {
+  MAX_READY_INTERVAL_MS,
+  MAX_READY_TIMEOUT_MS,
+  MIN_READY_INTERVAL_MS,
+  waitForReady,
+} from "./readiness.js";
+import {
+  buildProjectPreflight,
+  discoverProject,
+  inspectProject,
+} from "./project.js";
+import { buildCompatibilityReport } from "./compatibility.js";
+import {
+  getRuntimeStatus,
+  readRuntimeLogs,
+  startGodotRuntime,
+  stopManagedRuntime,
+  type RuntimeMode,
+} from "./runtime.js";
+import { validateSceneFile } from "./scene-validation.js";
+import { listTestProfiles, runTestProfile } from "./test-runner.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as readline from "node:readline";
 
 const program = new Command();
 
 program
-  .name("godot-cli")
+  .name("uo-godot-cli")
   .description(
     "CLI tool for controlling the Godot game engine — like Playwright, but for games"
   )
-  .version("0.2.0")
-  .option("--host <host>", "Godot server host", "localhost")
-  .option("--port <port>", "Godot server port", "9900")
-  .option("--mcp", "Run as Stdio MCP (Model Context Protocol) Server for AI Agents");
+  .version(CLI_VERSION)
+  .option("--host <host>", "Loopback Godot server host", "127.0.0.1")
+  .option("--port <port>", "Godot server port", "9900");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -67,12 +92,43 @@ async function run(
 
 function printOverview(): void {
   process.stdout.write(`
-godot-cli — like Playwright, but for the Godot game engine
+uo-godot-cli — hardened runtime control for Ultimate Odycer
 ===========================================================
-Control a running Godot 4.6+ game from the command line.
+Control a running Godot 4.7 game from the command line.
 All commands output JSON. Requires the GodotCLI addon enabled in your Godot project.
+GODOT_CLI_TOKEN (32+ characters) must be set for both Godot and this CLI.
 
-Options: --host <host> (default: localhost)  --port <port> (default: 9900)
+Options: --host <host> (loopback only)  --port <port> (default: 9900)
+
+ADDON MANAGEMENT
+  addon status <project>                    Inspect installation and coexistence
+  addon install <project> [--dry-run]       Install without enabling the plugin
+  addon install <project> --force           Atomically replace a modified copy
+
+PROJECT PREFLIGHT (local read-only; no runtime token required)
+  project discover [start]                  Find project.godot from a path or parent
+  project info [start]                      Inspect Godot, renderer, C# and plugins
+  project preflight [start]                 Run bounded Ultimate Odycer readiness checks
+  project compatibility [start] [--live]    Compare static catalogs and optional live gates
+
+MANAGED RUNTIME (token required; exact addon/autoload required for start)
+  runtime start [project] [--godot PATH]    Launch one owned Godot 4.7 process
+  runtime status [project]                  Verify PID, executable and instance marker
+  runtime logs [project] [--lines 200]      Read a bounded tail of the managed log
+  runtime stop [project]                    Stop only a verified owned process
+
+SCENE FILE VALIDATION (managed, safe-mode, no save)
+  scene validate <scene> [--project PATH]   Load, inspect logs, validate and stop
+
+PROJECT TEST PROFILES (local manifest; no shell)
+  test list [project]                       List declared profiles and availability
+  test run <profile> [project]              Run one bounded, allowlisted profile
+
+COMPATIBILITY
+  ping                                      Probe authenticated engine readiness once
+  wait-for-ready [--timeout 30]             Poll readiness with bounded retries
+  commands                                  List live commands, gates and availability
+  doctor [--allow-elevated]                 Verify protocol, Godot and safety gates
 
 SCENE TREE
   scene-tree [--depth N] [--root PATH]      Get the scene tree hierarchy
@@ -87,6 +143,11 @@ NODE OPERATIONS
   rename-node <path> <name>                 Rename a node
   reparent-node <path> <new-parent>         Move a node to a new parent
   call-method <path> <method> [args...]     Call any method on a node
+
+OPTIONAL FOVEACORE
+  fovea status                              Discover the FoveaCore bridge and splat nodes
+  fovea add <parent> <source> [options]     Add an unsaved FoveaSplat3D to the live scene
+  fovea validate                            Validate every FoveaSplat3D source and setting
 
 SCRIPTS
   attach-script <node> <script>             Attach a .gd or .cs script to a node
@@ -124,17 +185,20 @@ VERIFICATION & TESTING
   visible-nodes [--type Sprite2D]           List nodes currently visible in the viewport
 
 QUICK START
-  1. Copy godot-addon/addons/godot_cli/ into your Godot project's addons/ folder
-  2. Enable the GodotCLI plugin in Project Settings > Plugins
-  3. Run your game — server starts on port 9900
-  4. Run: godot-cli scene-tree
+  1. Run: uo-godot-cli project preflight /path/to/project
+  2. Run: uo-godot-cli addon install /path/to/project --dry-run
+  3. Run again without --dry-run after reviewing the JSON plan
+  4. Enable the GodotCLI plugin in Project Settings > Plugins
+  5. Run: uo-godot-cli runtime start /path/to/project --godot /path/to/godot
+  6. Run: uo-godot-cli scene-tree
+  7. Run: uo-godot-cli runtime stop /path/to/project
 
 VALUE FORMATS
   Primitives:    true, 42, 3.14, "hello"
   Godot types:   "Vector2(100, 200)", "Color(1, 0, 0, 1)", "Rect2(0, 0, 64, 64)"
   JSON objects:  '{"_type": "Vector2", "x": 100, "y": 200}'
 
-Run 'godot-cli <command> --help' for detailed usage of any command.
+Run 'uo-godot-cli <command> --help' for detailed usage of any command.
 `);
 }
 
@@ -150,6 +214,462 @@ function readStdin(): Promise<string> {
   });
 }
 
+function printLocalResult(value: unknown): void {
+  process.stdout.write(JSON.stringify(value, null, 2) + "\n");
+}
+
+function reportLocalError(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`Error: ${message}\n`);
+  process.exitCode = 1;
+}
+
+async function runDoctor(options: { allowElevated?: boolean }): Promise<void> {
+  const rootOptions = program.opts();
+  const client = new GodotClient({
+    host: rootOptions.host,
+    port: rootOptions.port,
+  });
+  try {
+    const response = await client.send("server_info");
+    if (response.status === "error") {
+      printLocalResult(response);
+      process.exitCode = 1;
+      return;
+    }
+    const report = buildDoctorReport(response.data, {
+      allowElevated: options.allowElevated,
+    });
+    printLocalResult(report);
+    if (report.status !== "ok") process.exitCode = 1;
+  } catch (error) {
+    reportLocalError(error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Project discovery and preflight (local filesystem only; read-only)
+// ---------------------------------------------------------------------------
+
+const projectCommands = program
+  .command("project")
+  .description("Discover and inspect a Godot project without starting Godot");
+
+projectCommands
+  .command("discover")
+  .description("Find project.godot from a path, UO_GODOT_PROJECT, or cwd")
+  .argument("[start]", "File or directory used as the upward search starting point")
+  .action(async (start?: string) => {
+    try {
+      printLocalResult(await discoverProject(start));
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+projectCommands
+  .command("info")
+  .description("Report project features, renderer, C# files, plugins and autoloads")
+  .argument("[start]", "File or directory used to discover project.godot")
+  .action(async (start?: string) => {
+    try {
+      printLocalResult(await inspectProject(start));
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+projectCommands
+  .command("preflight")
+  .description("Run bounded static Ultimate Odycer project readiness checks")
+  .argument("[start]", "File or directory used to discover project.godot")
+  .action(async (start?: string) => {
+    try {
+      const report = await buildProjectPreflight(start);
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+projectCommands
+  .command("compatibility")
+  .description("Compare the bundled CLI manifest with the installed godot_ai catalog")
+  .argument("[start]", "File or directory used to discover project.godot")
+  .option(
+    "--live",
+    "Observe authenticated CLI gates and the local Godot AI MCP tools catalog"
+  )
+  .option("--mcp-port <port>", "Local Godot AI MCP HTTP port", "8000")
+  .option(
+    "--live-timeout <milliseconds>",
+    "Total timeout for each bounded live endpoint probe",
+    "3000"
+  )
+  .action(
+    async (
+      start: string | undefined,
+      options: {
+        live?: boolean;
+        mcpPort: string;
+        liveTimeout: string;
+      }
+    ) => {
+      try {
+        const rootOptions = program.opts();
+        const report = await buildCompatibilityReport(
+          start,
+          {},
+          options.live
+            ? {
+                cliHost: rootOptions.host,
+                cliPort: rootOptions.port,
+                mcpPort: options.mcpPort,
+                timeoutMs: Number(options.liveTimeout),
+              }
+            : undefined
+        );
+        printLocalResult(report);
+        if (report.status !== "ok") process.exitCode = 1;
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
+// ---------------------------------------------------------------------------
+// Strictly owned Godot process lifecycle
+// ---------------------------------------------------------------------------
+
+const runtimeCommands = program
+  .command("runtime")
+  .description("Launch and control a strictly owned local Godot process");
+
+runtimeCommands
+  .command("start")
+  .description("Launch one managed Godot 4.7 process and wait for readiness")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .option("--godot <path>", "Godot 4.7 executable; otherwise GODOT_BIN or PATH")
+  .option("--mode <mode>", "headless, editor, or game", "headless")
+  .option("--scene <path>", "Optional regular res:// scene to launch")
+  .option("--timeout <seconds>", "Bounded readiness timeout", "30")
+  .option("--interval <milliseconds>", "Readiness polling interval", "250")
+  .option("--no-wait", "Return after process ownership is registered")
+  .option("--allow-mutations", "Enable the explicit runtime mutation gate")
+  .option("--allow-unsafe", "Enable both mutation and unsafe capability gates")
+  .action(
+    async (
+      project: string | undefined,
+      options: {
+        godot?: string;
+        mode: string;
+        scene?: string;
+        timeout: string;
+        interval: string;
+        wait: boolean;
+        allowMutations?: boolean;
+        allowUnsafe?: boolean;
+      }
+    ) => {
+      try {
+        const rootOptions = program.opts();
+        const report = await startGodotRuntime({
+          project,
+          godot: options.godot,
+          host: rootOptions.host,
+          port: rootOptions.port,
+          mode: options.mode as RuntimeMode,
+          scene: options.scene,
+          wait: options.wait,
+          timeoutMs: Number(options.timeout) * 1000,
+          intervalMs: Number(options.interval),
+          allowMutations: options.allowMutations,
+          allowUnsafe: options.allowUnsafe,
+        });
+        printLocalResult(report);
+        if (report.status !== "ok") process.exitCode = 1;
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
+runtimeCommands
+  .command("status")
+  .description("Verify the managed process identity without modifying it")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .action(async (project?: string) => {
+    try {
+      const discovery = await discoverProject(project);
+      const report = await getRuntimeStatus(discovery.projectRoot);
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+runtimeCommands
+  .command("logs")
+  .description("Read a bounded tail of the current or last managed runtime log")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .option("--lines <count>", "Maximum returned lines", "200")
+  .option("--bytes <count>", "Maximum returned log bytes", "65536")
+  .action(
+    async (
+      project: string | undefined,
+      options: { lines: string; bytes: string }
+    ) => {
+      try {
+        const discovery = await discoverProject(project);
+        printLocalResult(
+          await readRuntimeLogs(discovery.projectRoot, {
+            maxLines: Number(options.lines),
+            maxBytes: Number(options.bytes),
+          })
+        );
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
+runtimeCommands
+  .command("stop")
+  .description("Stop only the process matching the stored executable and instance marker")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .option("--timeout <seconds>", "Maximum graceful stop wait", "10")
+  .action(async (project: string | undefined, options: { timeout: string }) => {
+    try {
+      const discovery = await discoverProject(project);
+      const report = await stopManagedRuntime(discovery.projectRoot, {
+        timeoutMs: Number(options.timeout) * 1000,
+      });
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// One-shot scene file validation (owned runtime, safe mode, no save)
+// ---------------------------------------------------------------------------
+
+const sceneCommands = program
+  .command("scene")
+  .description("Validate a scene file through a temporary owned Godot runtime");
+
+sceneCommands
+  .command("validate")
+  .description("Load one scene, run structural checks, inspect logs, then stop")
+  .argument("<scene>", "Regular res:// .tscn or .scn file")
+  .option("--project <path>", "Godot project path; otherwise discover from env or cwd")
+  .option("--godot <path>", "Godot 4.7 executable; otherwise GODOT_BIN or PATH")
+  .option("--timeout <seconds>", "Bounded readiness timeout", "30")
+  .option("--interval <milliseconds>", "Readiness polling interval", "250")
+  .action(
+    async (
+      scene: string,
+      options: {
+        project?: string;
+        godot?: string;
+        timeout: string;
+        interval: string;
+      }
+    ) => {
+      try {
+        const rootOptions = program.opts();
+        const report = await validateSceneFile({
+          scene,
+          project: options.project,
+          godot: options.godot,
+          host: rootOptions.host,
+          port: rootOptions.port,
+          timeoutMs: Number(options.timeout) * 1000,
+          intervalMs: Number(options.interval),
+        });
+        printLocalResult(report);
+        if (report.status !== "ok") process.exitCode = 1;
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
+// ---------------------------------------------------------------------------
+// Project-defined, bounded test profiles
+// ---------------------------------------------------------------------------
+
+const testCommands = program
+  .command("test")
+  .description("List or run allowlisted profiles from .uo-godot-tests.json");
+
+testCommands
+  .command("list")
+  .description("List declared test profiles and dependency availability")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .option("--godot <path>", "Godot 4.7 executable; otherwise GODOT_BIN or PATH")
+  .action(async (project: string | undefined, options: { godot?: string }) => {
+    try {
+      printLocalResult(await listTestProfiles({ project, godot: options.godot }));
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+testCommands
+  .command("run")
+  .description("Run exactly one declared profile without invoking a shell")
+  .argument("<profile>", "Profile id declared in .uo-godot-tests.json")
+  .argument("[project]", "Godot project path; otherwise discover from env or cwd")
+  .option("--godot <path>", "Godot 4.7 executable; otherwise GODOT_BIN or PATH")
+  .option(
+    "--timeout <seconds>",
+    "Optional lower timeout; cannot exceed the manifest profile limit"
+  )
+  .action(
+    async (
+      profile: string,
+      project: string | undefined,
+      options: { godot?: string; timeout?: string }
+    ) => {
+      try {
+        const timeoutSeconds =
+          options.timeout === undefined ? undefined : Number(options.timeout);
+        const report = await runTestProfile({
+          profile,
+          project,
+          godot: options.godot,
+          timeoutSeconds,
+        });
+        printLocalResult(report);
+        if (report.status !== "ok") process.exitCode = 1;
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
+// ---------------------------------------------------------------------------
+// Compatibility gate
+// ---------------------------------------------------------------------------
+
+program
+  .command("ping")
+  .description("Probe authenticated Godot engine readiness once")
+  .action(async () => {
+    await run("ping");
+  });
+
+program
+  .command("commands")
+  .description("List live commands, security categories and gate availability")
+  .action(async () => {
+    await run("commands");
+  });
+
+program
+  .command("wait-for-ready")
+  .description("Poll the authenticated readiness probe until Godot is ready")
+  .option("--timeout <seconds>", "Maximum wait in seconds", "30")
+  .option("--interval <milliseconds>", "Delay between attempts", "250")
+  .action(async (options: { timeout: string; interval: string }) => {
+    const timeoutSeconds = Number(options.timeout);
+    const intervalMs = Number(options.interval);
+    if (
+      !Number.isFinite(timeoutSeconds) ||
+      timeoutSeconds <= 0 ||
+      timeoutSeconds * 1000 > MAX_READY_TIMEOUT_MS
+    ) {
+      reportLocalError(
+        new Error(
+          `--timeout must be greater than 0 and at most ${MAX_READY_TIMEOUT_MS / 1000} seconds`
+        )
+      );
+      return;
+    }
+    if (
+      !Number.isFinite(intervalMs) ||
+      intervalMs < MIN_READY_INTERVAL_MS ||
+      intervalMs > MAX_READY_INTERVAL_MS
+    ) {
+      reportLocalError(
+        new Error(
+          `--interval must be between ${MIN_READY_INTERVAL_MS} and ${MAX_READY_INTERVAL_MS} milliseconds`
+        )
+      );
+      return;
+    }
+
+    const rootOptions = program.opts();
+    try {
+      const report = await waitForReady(
+        new GodotClient({ host: rootOptions.host, port: rootOptions.port }),
+        { timeoutMs: timeoutSeconds * 1000, intervalMs }
+      );
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+program
+  .command("doctor")
+  .description("Verify addon protocol, Godot version and capability gates")
+  .option(
+    "--allow-elevated",
+    "Accept explicitly enabled mutation and unsafe capability gates"
+  )
+  .action(runDoctor);
+
+// ---------------------------------------------------------------------------
+// Addon lifecycle commands (local filesystem only; no runtime token required)
+// ---------------------------------------------------------------------------
+
+const addon = program
+  .command("addon")
+  .description("Inspect or install the bundled GodotCLI addon");
+
+addon
+  .command("status")
+  .description("Inspect addon integrity and coexistence with godot_ai")
+  .argument("<project>", "Godot project directory containing project.godot")
+  .action(async (project: string) => {
+    try {
+      printLocalResult(await inspectAddon(project));
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+addon
+  .command("install")
+  .description("Install the addon without enabling it in project.godot")
+  .argument("<project>", "Godot project directory containing project.godot")
+  .option("--dry-run", "Report the planned action without writing files")
+  .option("--force", "Atomically replace an existing modified addon")
+  .action(
+    async (
+      project: string,
+      options: { dryRun?: boolean; force?: boolean }
+    ) => {
+      try {
+        printLocalResult(
+          await installAddon({
+            project,
+            dryRun: options.dryRun,
+            force: options.force,
+          })
+        );
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
 // ---------------------------------------------------------------------------
 // Scene commands
 // ---------------------------------------------------------------------------
@@ -160,7 +680,19 @@ program
   .option("--depth <depth>", "Maximum depth", "10")
   .option("--root <path>", "Root node path")
   .action(async (opts: { depth: string; root?: string }) => {
-    const params: Record<string, unknown> = { depth: parseInt(opts.depth) };
+    const depth = Number(opts.depth);
+    if (
+      !Number.isInteger(depth) ||
+      depth < 0 ||
+      depth > MAX_SCENE_TREE_DEPTH
+    ) {
+      process.stderr.write(
+        `Error: --depth must be an integer between 0 and ${MAX_SCENE_TREE_DEPTH}\n`
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const params: Record<string, unknown> = { depth };
     if (opts.root) params.root = opts.root;
     await run("scene_tree", params);
   });
@@ -357,10 +889,9 @@ program
 
 program
   .command("screenshot")
-  .description("Capture the game viewport to PNG file or Base64 string")
+  .description("Capture a screenshot of the game viewport")
   .option("--output <path>", "Output file path", "screenshot.png")
-  .option("--base64", "Output raw base64 JSON response instead of saving file")
-  .action(async (opts: { output: string; base64?: boolean }) => {
+  .action(async (opts: { output: string }) => {
     const gopts = program.opts();
     const client = new GodotClient({ host: gopts.host, port: gopts.port });
     try {
@@ -374,10 +905,6 @@ program
         width: number;
         height: number;
       };
-      if (opts.base64) {
-        process.stdout.write(JSON.stringify(response, null, 2) + "\n");
-        return;
-      }
       const buffer = Buffer.from(data.base64_png, "base64");
       const outputPath = path.resolve(opts.output);
       fs.writeFileSync(outputPath, buffer);
@@ -478,6 +1005,76 @@ program
   });
 
 // ---------------------------------------------------------------------------
+// Optional FoveaCore commands
+// ---------------------------------------------------------------------------
+
+const fovea = program
+  .command("fovea")
+  .description("Control the optional, versioned FoveaCore automation bridge");
+
+fovea
+  .command("status")
+  .description("Discover FoveaCore and list splat nodes in the current scene")
+  .action(async () => {
+    await run("fovea_status");
+  });
+
+fovea
+  .command("add")
+  .description("Add an unsaved FoveaSplat3D from an existing project asset")
+  .argument("<parent>", "Parent node path inside the current scene")
+  .argument("<source>", "Existing res:// .fovea, .ply, or .splat asset")
+  .option("--name <name>", "Deterministic node name")
+  .option("--quality <preset>", "auto, performance, balanced, or cinematic", "auto")
+  .option("--opacity <value>", "Opacity from 0 to 1", "1")
+  .option("--collisions", "Generate collisions (native .fovea sources only)")
+  .option("--dynamic", "Mark the splat as dynamic instead of static")
+  .action(
+    async (
+      parent: string,
+      source: string,
+      opts: {
+        name?: string;
+        quality: string;
+        opacity: string;
+        collisions?: boolean;
+        dynamic?: boolean;
+      }
+    ) => {
+      const qualities = new Set(["auto", "performance", "balanced", "cinematic"]);
+      const quality = opts.quality.toLowerCase();
+      if (!qualities.has(quality)) {
+        throw new Error(
+          "--quality must be auto, performance, balanced, or cinematic"
+        );
+      }
+      const opacity = Number(opts.opacity);
+      if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) {
+        throw new Error("--opacity must be a finite number between 0 and 1");
+      }
+      const params: Record<string, unknown> = {
+        parent,
+        source_path: source,
+        quality,
+        opacity,
+        generate_collisions: opts.collisions === true,
+        is_static: opts.dynamic !== true,
+      };
+      if (opts.name) params.name = opts.name;
+      await run("fovea_add_splat", params, { timeoutMs: 60_000 });
+    }
+  );
+
+fovea
+  .command("validate")
+  .description("Validate FoveaCore availability and every splat in the scene")
+  .action(async () => {
+    await run("fovea_validate", {}, {
+      exitOnFail: (data) => data.valid !== true,
+    });
+  });
+
+// ---------------------------------------------------------------------------
 // Verification commands
 // ---------------------------------------------------------------------------
 
@@ -508,8 +1105,18 @@ program
         interval: string;
       }
     ) => {
-      const timeout = parseFloat(opts.timeout);
-      const interval = parseFloat(opts.interval);
+      const timeout = Number(opts.timeout);
+      const interval = Number(opts.interval);
+      if (!Number.isFinite(timeout) || timeout <= 0) {
+        process.stderr.write("Error: --timeout must be a positive finite number\n");
+        process.exitCode = 1;
+        return;
+      }
+      if (!Number.isFinite(interval) || interval <= 0) {
+        process.stderr.write("Error: --interval must be a positive finite number\n");
+        process.exitCode = 1;
+        return;
+      }
       const params: Record<string, unknown> = { timeout, interval };
 
       if (expr) {
@@ -563,7 +1170,19 @@ program
       const params: Record<string, unknown> = {};
 
       if (opts.checks) {
-        params.checks = JSON.parse(opts.checks);
+        const checks: unknown = JSON.parse(opts.checks);
+        if (!Array.isArray(checks)) {
+          throw new Error("--checks must contain a JSON array");
+        }
+        if (checks.length > MAX_ASSERT_CHECKS) {
+          throw new Error(
+            `--checks supports at most ${MAX_ASSERT_CHECKS} entries`
+          );
+        }
+        if (checks.some((entry) => typeof entry !== "object" || entry === null || Array.isArray(entry))) {
+          throw new Error("--checks entries must be JSON objects");
+        }
+        params.checks = checks;
       } else if (expr) {
         params.expr = expr;
       } else if (opts.exists) {
@@ -632,692 +1251,11 @@ program
     await run("visible_nodes", params);
   });
 
-program
-  .command("ping")
-  .description("Ping the running Godot game engine to check connection readiness")
-  .action(async () => {
-    await run("ping");
-  });
-
-program
-  .command("batch-execute")
-  .description("Execute multiple commands in a single TCP request")
-  .argument("<json-commands>", "JSON string array of commands, e.g. '[{\"command\": \"ping\"}]'")
-  .action(async (jsonStr: string) => {
-    try {
-      const commands = JSON.parse(jsonStr);
-      await run("batch_execute", { commands });
-    } catch {
-      process.stderr.write("Error: Invalid JSON array format for batch-execute\n");
-      process.exit(1);
-    }
-  });
-
-program
-  .command("get-logs")
-  .description("Retrieve GDScript runtime logs, errors, and warnings")
-  .option("--level <level>", "Filter level (info, warning, error)")
-  .option("--clear", "Clear log buffer after fetching")
-  .action(async (opts: { level?: string; clear?: boolean }) => {
-    await run("get_logs", { level: opts.level, clear: opts.clear });
-  });
-
-program
-  .command("list-signals")
-  .description("List all signals of a node and connected target callables")
-  .argument("<path>", "Node path")
-  .action(async (nodePath: string) => {
-    await run("list_signals", { path: nodePath });
-  });
-
-program
-  .command("emit-signal")
-  .description("Emit a GDScript signal on a node")
-  .argument("<path>", "Node path")
-  .argument("<signal>", "Signal name")
-  .argument("[args...]", "Signal arguments")
-  .action(async (nodePath: string, signalName: string, args: string[]) => {
-    const parsedArgs = (args || []).map(parseValue);
-    await run("emit_signal", { path: nodePath, signal: signalName, args: parsedArgs });
-  });
-
-program
-  .command("query-ray")
-  .description("Perform a 3D or 2D physics raycast query in the world space state")
-  .option("--from <vector>", "Start position (e.g. Vector3(0,10,0))", "Vector3(0,10,0)")
-  .option("--to <vector>", "End position (e.g. Vector3(0,0,0))", "Vector3(0,0,0)")
-  .option("--2d", "Perform 2D raycast instead of 3D")
-  .action(async (opts: { from: string; to: string; "2d"?: boolean }) => {
-    await run("query_ray", { is_3d: !opts["2d"], from: opts.from, to: opts.to });
-  });
-
-program
-  .command("query-point")
-  .description("Query physics colliders at a specific 3D or 2D point")
-  .argument("<point>", "Point position (e.g. Vector3(0,0,0) or Vector2(100,100))")
-  .option("--2d", "Perform 2D point query instead of 3D")
-  .action(async (pointStr: string, opts: { "2d"?: boolean }) => {
-    await run("query_point", { is_3d: !opts["2d"], point: pointStr });
-  });
-
-program
-  .command("action-press")
-  .description("Simulate pressing an InputMap action (e.g. ui_accept, move_forward)")
-  .argument("<action>", "Action name")
-  .option("--strength <strength>", "Action strength (0.0 to 1.0)", "1.0")
-  .action(async (actionName: string, opts: { strength: string }) => {
-    await run("action_press", { action: actionName, strength: parseFloat(opts.strength) });
-  });
-
-program
-  .command("action-release")
-  .description("Simulate releasing an InputMap action")
-  .argument("<action>", "Action name")
-  .action(async (actionName: string) => {
-    await run("action_release", { action: actionName });
-  });
-
-program
-  .command("metrics")
-  .description("Get detailed engine performance monitors (FPS, process/physics ms, draw calls, video memory)")
-  .action(async () => {
-    await run("metrics");
-  });
-
-program
-  .command("find-nodes")
-  .description("Find nodes matching wildcard pattern, class type, or node group")
-  .option("--pattern <pattern>", "Name pattern (e.g. *Player* or Enemy*)")
-  .option("--type <class>", "Node class (e.g. CharacterBody3D, Sprite2D)")
-  .option("--group <group>", "Node group name")
-  .option("--root <path>", "Root node path to search from")
-  .action(async (opts: { pattern?: string; type?: string; group?: string; root?: string }) => {
-    await run("find_nodes", {
-      pattern: opts.pattern,
-      type: opts.type,
-      group: opts.group,
-      root: opts.root,
-    });
-  });
-
-program
-  .command("replay")
-  .description("Replay a JSON file containing a sequence of commands with delays")
-  .argument("<file>", "JSON file path containing script sequence")
-  .action(async (filePath: string) => {
-    try {
-      const fullPath = path.resolve(filePath);
-      const content = fs.readFileSync(fullPath, "utf-8");
-      const steps = JSON.parse(content);
-      if (!Array.isArray(steps)) {
-        throw new Error("Replay file must contain a JSON array of command objects");
-      }
-      const opts = program.opts();
-      const client = new GodotClient({ host: opts.host, port: opts.port });
-      for (const step of steps) {
-        if (step.delay_ms && typeof step.delay_ms === "number" && step.delay_ms > 0) {
-          await new Promise((r) => setTimeout(r, step.delay_ms));
-        }
-        const res = await client.send(step.command, step.params || {});
-        process.stdout.write(JSON.stringify(res, null, 2) + "\n");
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`Replay Error: ${msg}\n`);
-      process.exit(1);
-    }
-  });
-
-program
-  .command("repl")
-  .description("Interactive REPL shell connected to running Godot game")
-  .action(async () => {
-    const opts = program.opts();
-    const client = new GodotClient({ host: opts.host, port: opts.port });
-    process.stdout.write(`godot-cli REPL (connected to ${opts.host}:${opts.port})\nType 'exit' to quit.\n\n`);
-
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      prompt: "godot> ",
-    });
-
-    rl.prompt();
-
-    rl.on("line", async (line: string) => {
-      const trimmed = line.trim();
-      if (trimmed === "exit" || trimmed === "quit") {
-        rl.close();
-        return;
-      }
-      if (trimmed) {
-        try {
-          let res: GodotResponse;
-          if (["ping", "metrics", "viewport_info", "scene_tree", "get_logs"].includes(trimmed)) {
-            res = await client.send(trimmed);
-          } else {
-            res = await client.send("eval", { code: trimmed });
-          }
-          process.stdout.write(JSON.stringify(res, null, 2) + "\n");
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          process.stderr.write(`REPL Error: ${msg}\n`);
-        }
-      }
-      rl.prompt();
-    });
-  });
-
-program
-  .command("assert-screenshot")
-  .description("Assert visual match between current game viewport and golden reference image")
-  .requiredOption("--golden <path>", "Golden reference PNG image path")
-  .option("--threshold <tolerance>", "Maximum allowed pixel mismatch ratio (0.0 to 1.0)", "0.02")
-  .option("--output <path>", "Save captured screenshot to file")
-  .action(async (opts: { golden: string; threshold: string; output?: string }) => {
-    const gopts = program.opts();
-    const client = new GodotClient({ host: gopts.host, port: gopts.port });
-    try {
-      const response = await client.send("screenshot", {});
-      if (response.status === "error") {
-        process.stderr.write(`Error: ${response.error}\n`);
-        process.exit(1);
-      }
-      const data = response.data as { base64_png: string; width: number; height: number };
-      const currentBuf = Buffer.from(data.base64_png, "base64");
-
-      if (opts.output) {
-        fs.writeFileSync(path.resolve(opts.output), currentBuf);
-      }
-
-      const goldenPath = path.resolve(opts.golden);
-      if (!fs.existsSync(goldenPath)) {
-        process.stderr.write(`Error: Golden reference image not found at ${goldenPath}\n`);
-        process.exit(1);
-      }
-      const goldenBuf = fs.readFileSync(goldenPath);
-
-      let diffBytes = 0;
-      const minLen = Math.min(currentBuf.length, goldenBuf.length);
-      const maxLen = Math.max(currentBuf.length, goldenBuf.length);
-      for (let i = 0; i < minLen; i++) {
-        if (currentBuf[i] !== goldenBuf[i]) diffBytes++;
-      }
-      diffBytes += (maxLen - minLen);
-      const diffRatio = diffBytes / maxLen;
-      const thresholdNum = parseFloat(opts.threshold);
-
-      const passed = diffRatio <= thresholdNum;
-      const resultData = {
-        passed,
-        diff_ratio: parseFloat(diffRatio.toFixed(4)),
-        threshold: thresholdNum,
-        golden: goldenPath,
-        width: data.width,
-        height: data.height,
-      };
-
-      process.stdout.write(JSON.stringify({ status: passed ? "ok" : "error", data: resultData }, null, 2) + "\n");
-      if (!passed) {
-        process.exit(1);
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`Assert Screenshot Error: ${msg}\n`);
-      process.exit(1);
-    }
-  });
-
-program
-  .command("spawn-3d")
-  .description("Spawn a 3D object in the active Godot scene")
-  .option("--type <type>", "Node class name", "MeshInstance3D")
-  .option("--name <name>", "Object name", "New3DObject")
-  .option("--parent <parent>", "Parent node path", "/root")
-  .option("--position <pos>", "Position [x,y,z] or Vector3(x,y,z)")
-  .option("--rotation <rot>", "Rotation [x,y,z]")
-  .option("--scale <scale>", "Scale [x,y,z]")
-  .action(async (opts) => {
-    await run("spawn_3d_object", {
-      type: opts.type,
-      name: opts.name,
-      parent_path: opts.parent,
-      position: opts.position ? parseValue(opts.position) : undefined,
-      rotation: opts.rotation ? parseValue(opts.rotation) : undefined,
-      scale: opts.scale ? parseValue(opts.scale) : undefined,
-    });
-  });
-
-program
-  .command("transform-3d")
-  .description("Transform a 3D node position, rotation, or scale")
-  .argument("<node-path>", "Path to 3D node")
-  .option("--position <pos>", "New position")
-  .option("--rotation <rot>", "New rotation")
-  .option("--scale <scale>", "New scale")
-  .option("--relative", "Apply delta position/rotation relatively")
-  .action(async (nodePath, opts) => {
-    await run("transform_3d_node", {
-      node_path: nodePath,
-      position: opts.position ? parseValue(opts.position) : undefined,
-      rotation: opts.rotation ? parseValue(opts.rotation) : undefined,
-      scale: opts.scale ? parseValue(opts.scale) : undefined,
-      relative: opts.relative,
-    });
-  });
-
-program
-  .command("inspect-level")
-  .description("Inspect surrounding 3D level layout near a center position")
-  .option("--center <pos>", "Center position [x,y,z]", "0,0,0")
-  .option("--radius <radius>", "Search radius", "20")
-  .option("--root <path>", "Root path", "/root")
-  .action(async (opts) => {
-    await run("inspect_level_layout", {
-      center_position: parseValue(opts.center),
-      radius: parseFloat(opts.radius),
-      node_path: opts.root,
-    });
-  });
-
-program
-  .command("greformer-create")
-  .description("Create a GReFormer editable primitive (Box, Stairs, Cylinder)")
-  .option("--primitive <type>", "Box, Stairs, or Cylinder", "Box")
-  .option("--name <name>", "Object name", "GReFormer_Object")
-  .option("--position <pos>", "Position [x,y,z]")
-  .action(async (opts) => {
-    await run("greformer_create", {
-      primitive_type: opts.primitive,
-      name: opts.name,
-      position: opts.position ? parseValue(opts.position) : undefined,
-    });
-  });
-
-program
-  .command("greformer-push-pull")
-  .description("Extrude a GReFormer face along normal (SketchUp Push/Pull)")
-  .argument("<node-path>", "Path to GReFormer node")
-  .option("--face <index>", "Face index", "0")
-  .option("--distance <dist>", "Distance along normal", "1.0")
-  .action(async (nodePath, opts) => {
-    await run("greformer_push_pull", {
-      node_path: nodePath,
-      face_index: parseInt(opts.face, 10),
-      distance: parseFloat(opts.distance),
-    });
-  });
-
-program
-  .command("greformer-hotspot")
-  .description("Apply a Hotspot UV texture mapping to a face")
-  .argument("<node-path>", "Path to GReFormer node")
-  .option("--face <index>", "Face index", "0")
-  .option("--region <region>", "Hotspot region: Wood_Plank, Metal_Trim, Stone_Wall, Bricks", "Wood_Plank")
-  .action(async (nodePath, opts) => {
-    await run("greformer_apply_hotspot", {
-      node_path: nodePath,
-      face_index: parseInt(opts.face, 10),
-      region_name: opts.region,
-    });
-  });
-
-program
-  .command("greformer-bake")
-  .description("Bake a GReFormer editable mesh to standard MeshInstance3D with collision")
-  .argument("<node-path>", "Path to GReFormer node")
-  .action(async (nodePath) => {
-    await run("greformer_bake", {
-      node_path: nodePath,
-    });
-  });
-
-program
-  .command("capture-sequence")
-  .description("Capture a multi-frame sequence of viewport screenshots as base64 images")
-  .option("--count <count>", "Number of frames to capture (default 5, max 30)", "5")
-  .action(async (opts: { count: string }) => {
-    await run("capture_sequence", { count: parseInt(opts.count, 10) });
-  });
-
-program
-  .command("export-project-api")
-  .description("Scan loaded project GDScript scripts and export custom classes, properties, methods, and signals")
-  .action(async () => {
-    await run("export_project_api", {});
-  });
-
-program
-  .command("greformer-export-obj")
-  .description("Export a GReFormer node geometry to Wavefront .obj file")
-  .argument("<node-path>", "Path to GReFormer node")
-  .option("--output <path>", "Output file path (default res://exported_mesh.obj)", "res://exported_mesh.obj")
-  .action(async (nodePath, opts) => {
-    await run("greformer_export_obj", {
-      node_path: nodePath,
-      output_path: opts.output,
-    });
-  });
-
-program
-  .command("greformer-preset")
-  .description("Create an architectural blockout preset (Wall, Ramp, Pillar, Arch, Doorway)")
-  .option("--preset <type>", "Wall, Ramp, Pillar, Arch, Doorway", "Wall")
-  .option("--name <name>", "Object name", "GReFormer_Preset")
-  .option("--position <pos>", "Position [x,y,z]")
-  .action(async (opts) => {
-    await run("greformer_create_preset", {
-      preset: opts.preset,
-      name: opts.name,
-      position: opts.position ? parseValue(opts.position) : undefined,
-    });
-  });
-
-program
-  .command("greformer-snap")
-  .description("Snap node to grid (0.25m, 0.5m, 1.0m, 2.0m)")
-  .argument("<node-path>", "Path to node")
-  .option("--step <number>", "Grid step (default 1.0)", "1.0")
-  .action(async (nodePath, opts) => {
-    await run("greformer_snap_grid", {
-      node_path: nodePath,
-      step: parseFloat(opts.step),
-    });
-  });
-
-program
-  .command("greformer-carve")
-  .description("Carve doorway or window hole into GReFormer node")
-  .argument("<node-path>", "Path to GReFormer node")
-  .option("--type <door|window>", "Hole type (door or window)", "door")
-  .action(async (nodePath, opts) => {
-    await run("greformer_carve_hole", {
-      node_path: nodePath,
-      hole_type: opts.type,
-    });
-  });
-
-program
-  .command("greformer-bevel")
-  .description("Bevel / chamfer edges of a GReFormer node")
-  .argument("<node-path>", "Path to GReFormer node")
-  .option("--offset <number>", "Bevel offset distance", "0.1")
-  .action(async (nodePath, opts) => {
-    await run("greformer_bevel_edges", {
-      node_path: nodePath,
-      offset: parseFloat(opts.offset),
-    });
-  });
-
-program
-  .command("greformer-stairs")
-  .description("Generate parametric staircase with optional railings")
-  .option("--parent <path>", "Parent node path", "/root")
-  .option("--steps <number>", "Number of steps", "8")
-  .option("--width <number>", "Step width", "2.0")
-  .option("--height <number>", "Step height", "0.25")
-  .option("--depth <number>", "Step depth", "0.4")
-  .option("--railings <boolean>", "Add side railings", "true")
-  .action(async (opts) => {
-    await run("greformer_generate_stairs", {
-      parent: opts.parent,
-      step_count: parseInt(opts.steps),
-      step_width: parseFloat(opts.width),
-      step_height: parseFloat(opts.height),
-      step_depth: parseFloat(opts.depth),
-      has_railings: opts.railings === "true",
-    });
-  });
-
-program
-  .command("greformer-archway")
-  .description("Generate parametric archway or curved tunnel portal")
-  .option("--parent <path>", "Parent node path", "/root")
-  .option("--width <number>", "Archway width", "3.0")
-  .option("--height <number>", "Archway height", "4.0")
-  .option("--depth <number>", "Archway depth", "1.0")
-  .action(async (opts) => {
-    await run("greformer_generate_archway", {
-      parent: opts.parent,
-      width: parseFloat(opts.width),
-      height: parseFloat(opts.height),
-      depth: parseFloat(opts.depth),
-    });
-  });
-
-program
-  .command("greformer-array")
-  .description("Duplicate GReFormer node in linear or radial array")
-  .argument("<node-path>", "Path to GReFormer node")
-  .option("--mode <linear|radial>", "Array mode (linear or radial)", "linear")
-  .option("--count <number>", "Number of copies", "5")
-  .action(async (nodePath, opts) => {
-    await run("greformer_array_duplicate", {
-      node_path: nodePath,
-      mode: opts.mode,
-      count: parseInt(opts.count),
-    });
-  });
-
-program
-  .command("greformer-collision")
-  .description("Generate convex or trimesh collision shape for GReFormer node")
-  .argument("<node-path>", "Path to GReFormer node")
-  .option("--mode <convex|trimesh>", "Collision mode (convex or trimesh)", "convex")
-  .action(async (nodePath, opts) => {
-    await run("greformer_generate_collision", {
-      node_path: nodePath,
-      mode: opts.mode,
-    });
-  });
-
-program
-  .command("greformer-terrain")
-  .description("Generate low-poly heightmap terrain grid")
-  .option("--parent <path>", "Parent node path", "/root")
-  .option("--width <number>", "Grid width in cells", "16")
-  .option("--depth <number>", "Grid depth in cells", "16")
-  .option("--height <number>", "Maximum height elevation", "3.0")
-  .action(async (opts) => {
-    await run("greformer_generate_terrain", {
-      parent: opts.parent,
-      grid_width: parseInt(opts.width),
-      grid_depth: parseInt(opts.depth),
-      max_height: parseFloat(opts.height),
-    });
-  });
-
-program
-  .command("greformer-tunnel")
-  .description("Generate modular dungeon tunnel / catacomb section")
-  .option("--parent <path>", "Parent node path", "/root")
-  .option("--length <number>", "Tunnel length", "6.0")
-  .option("--width <number>", "Tunnel width", "3.0")
-  .option("--height <number>", "Tunnel height", "3.0")
-  .action(async (opts) => {
-    await run("greformer_generate_tunnel", {
-      parent: opts.parent,
-      length: parseFloat(opts.length),
-      width: parseFloat(opts.width),
-      height: parseFloat(opts.height),
-    });
-  });
-
-program
-  .command("undo")
-  .description("Undo last editor or scene modification")
-  .action(async () => {
-    await run("undo", {});
-  });
-
-program
-  .command("redo")
-  .description("Redo previously undone modification")
-  .action(async () => {
-    await run("redo", {});
-  });
-
-program
-  .command("fuzzy-find-node")
-  .description("Fuzzy search scene tree nodes matching partial query string")
-  .argument("<query>", "Partial node name query string")
-  .action(async (query: string) => {
-    await run("fuzzy_find_node", { query });
-  });
-
-program
-  .command("profile-performance")
-  .description("Deep performance profiler: FPS, frametime, draw calls, VRAM, and orphan node memory leaks")
-  .action(async () => {
-    await run("profile_performance", {});
-  });
-
-program
-  .command("inspect-resources")
-  .description("Inspect all attached resources (textures, shaders, audio, collision shapes) on a node")
-  .argument("<node-path>", "Path to node")
-  .action(async (nodePath: string) => {
-    await run("inspect_resources", { path: nodePath });
-  });
-
-program
-  .command("record-metrics")
-  .description("Record time-series performance metrics (FPS, process/physics time, VRAM, draw calls)")
-  .option("--duration <sec>", "Sample duration in seconds", "1.0")
-  .action(async (opts: { duration: string }) => {
-    await run("record_metrics", { duration: parseFloat(opts.duration) });
-  });
-
-program
-  .command("version")
-  .description("Get detailed engine version, build details, OS, and locale information")
-  .action(async () => {
-    await run("version", {});
-  });
-
-program
-  .command("clear-logs")
-  .description("Clear runtime print/warning/error log buffer")
-  .action(async () => {
-    await run("clear_logs", {});
-  });
-
-program
-  .command("inspect-children")
-  .description("Inspect direct or nested child nodes under a target path")
-  .argument("[node-path]", "Path to node", "")
-  .option("--depth <number>", "Inspection depth", "1")
-  .action(async (nodePath: string, opts: { depth: string }) => {
-    await run("inspect_children", { path: nodePath, depth: parseInt(opts.depth, 10) });
-  });
-
-program
-  .command("init-mcp")
-  .description("Generate or update .mcp.json snippet to register godot-cli-mcp server")
-  .action(async () => {
-    try {
-      const mcpPath = path.resolve(".mcp.json");
-      let mcpConfig: any = { mcpServers: {} };
-      if (fs.existsSync(mcpPath)) {
-        try {
-          mcpConfig = JSON.parse(fs.readFileSync(mcpPath, "utf-8"));
-          if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
-        } catch {
-          mcpConfig = { mcpServers: {} };
-        }
-      }
-      mcpConfig.mcpServers["godot-cli"] = {
-        command: "npx",
-        args: ["-y", "godot-cli-mcp"],
-      };
-      fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2) + "\n");
-      process.stdout.write(JSON.stringify({
-        status: "ok",
-        message: "Successfully updated .mcp.json with godot-cli-mcp server entry!",
-        path: mcpPath,
-      }, null, 2) + "\n");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`Init MCP Error: ${msg}\n`);
-      process.exit(1);
-    }
-  });
-
-program
-  .command("install-addon")
-  .description("Copy GodotCLI addon into target Godot project and enable it in project.godot")
-  .argument("[target-path]", "Path to Godot project directory", "./")
-  .action(async (targetPath: string) => {
-    try {
-      const projDir = path.resolve(targetPath);
-      const projFile = path.join(projDir, "project.godot");
-      if (!fs.existsSync(projFile)) {
-        process.stderr.write(`Error: No project.godot found at ${projDir}\n`);
-        process.exit(1);
-      }
-
-      const __dirname = path.dirname(new URL(import.meta.url).pathname);
-      let addonSource = path.resolve(__dirname, "../../godot-addon/addons/godot_cli");
-      if (!fs.existsSync(addonSource)) {
-        addonSource = path.resolve(__dirname, "../godot-addon/addons/godot_cli");
-      }
-
-      const destAddonDir = path.join(projDir, "addons", "godot_cli");
-      fs.mkdirSync(destAddonDir, { recursive: true });
-
-      if (fs.existsSync(addonSource)) {
-        const files = fs.readdirSync(addonSource);
-        for (const file of files) {
-          const srcFile = path.join(addonSource, file);
-          const destFile = path.join(destAddonDir, file);
-          if (fs.statSync(srcFile).isFile()) {
-            fs.copyFileSync(srcFile, destFile);
-          }
-        }
-      }
-
-      let projContent = fs.readFileSync(projFile, "utf-8");
-      const pluginEntry = "res://addons/godot_cli/plugin.cfg";
-      if (!projContent.includes(pluginEntry)) {
-        if (projContent.includes("[editor_plugins]")) {
-          projContent = projContent.replace(
-            "[editor_plugins]",
-            `[editor_plugins]\n\nenabled=PackedStringArray("${pluginEntry}")`
-          );
-        } else {
-          projContent += `\n[editor_plugins]\n\nenabled=PackedStringArray("${pluginEntry}")\n`;
-        }
-        fs.writeFileSync(projFile, projContent);
-      }
-
-      process.stdout.write(
-        JSON.stringify(
-          {
-            status: "ok",
-            message: "GodotCLI addon installed and enabled in project!",
-            project: projFile,
-            addon: destAddonDir,
-          },
-          null,
-          2
-        ) + "\n"
-      );
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`Install Addon Error: ${msg}\n`);
-      process.exit(1);
-    }
-  });
-
 // ---------------------------------------------------------------------------
 
-program.action(async () => {
-  const opts = program.opts();
-  if (opts.mcp) {
-    await runMcpServer({ host: opts.host, port: opts.port });
-  } else {
-    printOverview();
-  }
+// Show overview when no command is given
+program.action(() => {
+  printOverview();
 });
 
-program.parse();
+program.parseAsync().catch(reportLocalError);

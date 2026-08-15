@@ -7,7 +7,7 @@ extends Node
 const DEFAULT_PORT := 9900
 const BIND_ADDRESS := "127.0.0.1"
 const PROTOCOL_VERSION := 1
-const ADDON_VERSION := "0.1.0-uo.6"
+const ADDON_VERSION := "0.1.0-uo.7"
 const MIN_TOKEN_LENGTH := 32
 const MAX_MESSAGE_BYTES := 1024 * 1024
 const MAX_RESPONSE_BYTES := 16 * 1024 * 1024
@@ -23,6 +23,66 @@ const MAX_SCENE_TREE_DEPTH := 64
 const MAX_SCENE_NODES := 4096
 const MAX_VISIBLE_NODES := 4096
 const MAX_ASSERT_CHECKS := 256
+const FOVEA_BRIDGE_PATH := "res://addons/foveacore/scripts/integration/fovea_cli_bridge.gd"
+const FOVEA_CONTRACT_VERSION := 1
+
+const COMMAND_DESCRIPTIONS := {
+	"ping": "Probe authenticated Godot runtime readiness.",
+	"commands": "List live commands, capability gates, and agent-facing safety metadata.",
+	"server_info": "Return the runtime, endpoint, security gates, and protocol limits.",
+	"scene_tree": "Inspect a bounded hierarchy of the live scene tree.",
+	"get_node": "Read the serialized properties of one live node.",
+	"screenshot": "Capture the current viewport as PNG data without writing a project file.",
+	"read_file": "Read one bounded project file contained inside res://.",
+	"list_files": "List a bounded set of project files contained inside res://.",
+	"list_classes": "List bounded Godot engine class metadata.",
+	"class_info": "Inspect properties, methods, and signals for one Godot class.",
+	"wait_for": "Wait for a bounded property condition or gated expression to become true.",
+	"assert": "Evaluate bounded property checks or gated expressions and report pass or fail.",
+	"validate_scene": "Run bounded structural validation on the current scene.",
+	"fovea_status": "Inspect the optional FoveaCore bridge and live splat nodes.",
+	"fovea_validate": "Validate the optional FoveaCore bridge and live splat nodes.",
+	"viewport_info": "Read live viewport, rendering, physics, memory, and engine metrics.",
+	"visible_nodes": "List a bounded set of nodes visible in the current viewport.",
+	"set_property": "Set one property on one live node.",
+	"add_node": "Create one unsaved node under a live parent node.",
+	"remove_node": "Remove one live node and its descendants.",
+	"reparent_node": "Move one live node beneath a different parent.",
+	"rename_node": "Rename one live node.",
+	"click": "Inject one mouse click into the running project.",
+	"press_key": "Inject one bounded key press into the running project.",
+	"mouse_move": "Move the simulated mouse pointer to an absolute position.",
+	"load_scene": "Replace the current live scene with an existing res:// scene.",
+	"fovea_add_splat": "Add one unsaved FoveaSplat3D through the versioned FoveaCore bridge.",
+	"call_method": "Invoke an arbitrary method on one live node.",
+	"eval": "Compile and execute gated GDScript in the running project.",
+	"create_file": "Create or overwrite one bounded project file inside res://.",
+	"delete_file": "Delete one project file contained inside res://.",
+	"attach_script": "Attach an existing res:// script to one live node.",
+	"detach_script": "Detach the script from one live node.",
+	"save_scene": "Persist the current live scene to a bounded res:// path.",
+}
+
+## Conservative MCP-compatible hints. They improve agent planning but never
+## replace the server's authentication, path validation, or capability gates.
+const DESTRUCTIVE_COMMANDS := {
+	"wait_for": true,
+	"assert": true,
+	"remove_node": true,
+	"load_scene": true,
+	"call_method": true,
+	"eval": true,
+	"create_file": true,
+	"delete_file": true,
+	"attach_script": true,
+	"detach_script": true,
+	"save_scene": true,
+}
+
+const IDEMPOTENT_MUTATING_COMMANDS := {
+	"set_property": true,
+	"mouse_move": true,
+}
 
 const READ_ONLY_COMMANDS := {
 	"ping": true,
@@ -38,9 +98,10 @@ const READ_ONLY_COMMANDS := {
 	"wait_for": true,
 	"assert": true,
 	"validate_scene": true,
+	"fovea_status": true,
+	"fovea_validate": true,
 	"viewport_info": true,
 	"visible_nodes": true,
-	"inspect_level_layout": true,
 }
 
 const MUTATING_COMMANDS := {
@@ -53,17 +114,7 @@ const MUTATING_COMMANDS := {
 	"press_key": true,
 	"mouse_move": true,
 	"load_scene": true,
-	"spawn_3d_object": true,
-	"transform_3d_node": true,
-	"duplicate_3d_node": true,
-	"greformer_create": true,
-	"greformer_push_pull": true,
-	"greformer_apply_hotspot": true,
-	"greformer_bake": true,
-	"greformer_export_obj": true,
-	"greformer_create_preset": true,
-	"greformer_snap_grid": true,
-	"greformer_carve_hole": true,
+	"fovea_add_splat": true,
 }
 
 const UNSAFE_COMMANDS := {
@@ -338,12 +389,22 @@ func _command_catalog_entries(
 ) -> Array[Dictionary]:
 	var entries: Array[Dictionary] = []
 	for command in _sorted_command_names(commands):
+		var conditionally_unsafe := command == "wait_for" or command == "assert"
+		var read_only := security == "read_only" and not conditionally_unsafe
 		entries.append({
 			"name": command,
+			"title": command.replace("_", " ").capitalize(),
+			"description": str(COMMAND_DESCRIPTIONS.get(command, "Godot runtime command.")),
 			"security": security,
 			"enabled": enabled,
 			"required_gate": required_gate,
-			"conditionally_unsafe": command == "wait_for" or command == "assert",
+			"conditionally_unsafe": conditionally_unsafe,
+			"annotations": {
+				"readOnlyHint": read_only,
+				"destructiveHint": DESTRUCTIVE_COMMANDS.has(command),
+				"idempotentHint": read_only or IDEMPOTENT_MUTATING_COMMANDS.has(command),
+				"openWorldHint": true,
+			},
 		})
 	return entries
 
@@ -354,6 +415,10 @@ func _cmd_commands(_params: Dictionary) -> Dictionary:
 	entries.append_array(_command_catalog_entries(MUTATING_COMMANDS, "mutating", _allow_mutations, "GODOT_CLI_ALLOW_MUTATIONS"))
 	entries.append_array(_command_catalog_entries(UNSAFE_COMMANDS, "unsafe", _allow_unsafe, "GODOT_CLI_ALLOW_UNSAFE"))
 	return {"status": "ok", "data": {
+		"catalog_version": 1,
+		"protocol": "godot_cli_tcp_ndjson",
+		"mcp_server": false,
+		"annotations_are_security_controls": false,
 		"count": entries.size(),
 		"commands": entries,
 		"gates": {
@@ -402,34 +467,11 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 			return null  # Response is deferred
 		"assert": return _cmd_assert(params)
 		"validate_scene": return _cmd_validate_scene(params)
+		"fovea_status": return _cmd_fovea_status(params)
+		"fovea_validate": return _cmd_fovea_validate(params)
+		"fovea_add_splat": return _cmd_fovea_add_splat(params)
 		"viewport_info": return _cmd_viewport_info(params)
 		"visible_nodes": return _cmd_visible_nodes(params)
-		"spawn_3d_object": return _cmd_spawn_3d_object(params)
-		"transform_3d_node": return _cmd_transform_3d_node(params)
-		"inspect_level_layout": return _cmd_inspect_level_layout(params)
-		"duplicate_3d_node": return _cmd_duplicate_3d_node(params)
-		"greformer_create": return _cmd_greformer_create(params)
-		"greformer_push_pull": return _cmd_greformer_push_pull(params)
-		"greformer_apply_hotspot": return _cmd_greformer_apply_hotspot(params)
-		"greformer_bake": return _cmd_greformer_bake(params)
-		"greformer_export_obj": return _cmd_greformer_export_obj(params)
-		"greformer_create_preset": return _cmd_greformer_create_preset(params)
-		"greformer_snap_grid": return _cmd_greformer_snap_grid(params)
-		"greformer_carve_hole": return _cmd_greformer_carve_hole(params)
-		"greformer_set_shading": return _cmd_greformer_set_shading(params)
-		"greformer_paint_color": return _cmd_greformer_paint_color(params)
-		"greformer_export_gltf": return _cmd_greformer_export_gltf(params)
-		"greformer_bevel_edges": return _cmd_greformer_bevel_edges(params)
-		"greformer_generate_stairs": return _cmd_greformer_generate_stairs(params)
-		"undo": return _cmd_undo(params)
-		"redo": return _cmd_redo(params)
-		"fuzzy_find_node": return _cmd_fuzzy_find_node(params)
-		"profile_performance": return _cmd_profile_performance(params)
-		"inspect_resources": return _cmd_inspect_resources(params)
-		"record_metrics": return _cmd_record_metrics(params)
-		"version": return _cmd_version(params)
-		"clear_logs": return _cmd_clear_logs(params)
-		"inspect_children": return _cmd_inspect_children(params)
 		_: return {"status": "error", "error": "Unknown command: " + command}
 
 
@@ -1067,7 +1109,7 @@ func _cmd_list_files(params: Dictionary) -> Dictionary:
 
 	var dir := DirAccess.open(abs_path)
 	if dir == null:
-		return {"status": "error", "error": "Cannot open directory: " + error_string(DirAccess.get_dir_access_error())}
+		return {"status": "error", "error": "Cannot open directory: " + error_string(DirAccess.get_open_error())}
 
 	var files: Array = []
 	var dirs: Array = []
@@ -1741,6 +1783,142 @@ func _validate_cameras(cameras_2d: Array, cameras_3d: Array, warnings: Array) ->
 				"message": "Scene has Camera3D nodes but none is marked as current",
 			})
 
+
+# --- Optional FoveaCore automation contract ---
+
+func _probe_fovea_bridge() -> Dictionary:
+	if not ResourceLoader.exists(FOVEA_BRIDGE_PATH):
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_not_found",
+			"message": "FoveaCore automation bridge is not installed",
+		}
+	var bridge_script := load(FOVEA_BRIDGE_PATH) as Script
+	if bridge_script == null:
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_load_failed",
+			"message": "FoveaCore automation bridge could not be loaded",
+		}
+	var bridge := bridge_script.new() as RefCounted
+	if bridge == null or not bridge.has_method("contract"):
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_contract_missing",
+			"message": "FoveaCore automation bridge does not expose contract()",
+		}
+	var contract_value: Variant = bridge.call("contract")
+	if not contract_value is Dictionary:
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_contract_invalid",
+			"message": "FoveaCore automation contract must be a dictionary",
+		}
+	var contract: Dictionary = contract_value as Dictionary
+	if int(contract.get("version", -1)) != FOVEA_CONTRACT_VERSION:
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_version_mismatch",
+			"message": "Expected FoveaCore automation contract version %d" % FOVEA_CONTRACT_VERSION,
+			"contract": contract,
+		}
+	if contract.get("writes_files", true) != false \
+			or contract.get("starts_network_listener", true) != false:
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_security_contract_rejected",
+			"message": "FoveaCore bridge must not write files or start a network listener",
+			"contract": contract,
+		}
+	var operations_value: Variant = contract.get("operations", [])
+	if not operations_value is Array:
+		return {
+			"ok": false,
+			"reason": "foveacore_bridge_operations_invalid",
+			"message": "FoveaCore automation operations must be an array",
+			"contract": contract,
+		}
+	var operations: Array = operations_value as Array
+	for operation: String in ["status", "validate", "add_splat"]:
+		if operation not in operations:
+			return {
+				"ok": false,
+				"reason": "foveacore_bridge_operation_missing",
+				"message": "FoveaCore automation contract is missing operation: " + operation,
+				"contract": contract,
+			}
+	for method: String in ["status", "validate", "add_splat"]:
+		if not bridge.has_method(method):
+			return {
+				"ok": false,
+				"reason": "foveacore_bridge_method_missing",
+				"message": "FoveaCore automation bridge is missing method: " + method,
+				"contract": contract,
+			}
+	return {
+		"ok": true,
+		"bridge": bridge,
+		"contract": contract,
+	}
+
+
+func _call_fovea_bridge(method: String, arguments: Array) -> Dictionary:
+	var probe: Dictionary = _probe_fovea_bridge()
+	if not bool(probe.get("ok", false)):
+		return {
+			"status": "error",
+			"error": str(probe.get("message", "FoveaCore automation bridge is unavailable")),
+			"data": {
+				"available": false,
+				"compatible": false,
+				"reason": probe.get("reason", "foveacore_bridge_unavailable"),
+				"expected_contract_version": FOVEA_CONTRACT_VERSION,
+				"contract": probe.get("contract", null),
+			},
+		}
+	var bridge: RefCounted = probe["bridge"] as RefCounted
+	var result_value: Variant = bridge.callv(method, arguments)
+	if not result_value is Dictionary:
+		return {"status": "error", "error": "FoveaCore bridge returned an invalid response"}
+	var result: Dictionary = result_value as Dictionary
+	if not bool(result.get("ok", false)):
+		return {"status": "error", "error": str(result.get("error", "FoveaCore operation failed"))}
+	var data_value: Variant = result.get("data", {})
+	if not data_value is Dictionary:
+		return {"status": "error", "error": "FoveaCore bridge data must be a dictionary"}
+	var data: Dictionary = data_value as Dictionary
+	data["compatible"] = true
+	return {"status": "ok", "data": data}
+
+
+func _cmd_fovea_status(_params: Dictionary) -> Dictionary:
+	var result: Dictionary = _call_fovea_bridge("status", [get_tree(), MAX_SCENE_NODES])
+	if result.get("status") == "error" and result.has("data"):
+		# FoveaCore is optional: discovery remains a successful read-only probe.
+		return {"status": "ok", "data": result["data"]}
+	return result
+
+
+func _cmd_fovea_validate(_params: Dictionary) -> Dictionary:
+	var result: Dictionary = _call_fovea_bridge("validate", [get_tree(), MAX_SCENE_NODES])
+	if result.get("status") == "error" and result.has("data"):
+		var data: Dictionary = result["data"] as Dictionary
+		data["valid"] = false
+		data["complete"] = true
+		data["error_count"] = 1
+		data["warning_count"] = 0
+		data["errors"] = [{
+			"rule": str(data.get("reason", "foveacore_bridge_unavailable")),
+			"message": str(result.get("error", "FoveaCore automation bridge is unavailable")),
+		}]
+		data["warnings"] = []
+		return {"status": "ok", "data": data}
+	return result
+
+
+func _cmd_fovea_add_splat(params: Dictionary) -> Dictionary:
+	return _call_fovea_bridge("add_splat", [get_tree(), params])
+
 # --- Viewport Info ---
 
 func _cmd_viewport_info(_params: Dictionary) -> Dictionary:
@@ -1854,500 +2032,3 @@ func _collect_visible_nodes(
 		if bool(traversal["truncated"]):
 			break
 		_collect_visible_nodes(child, result, type_filter, viewport_rect, depth + 1, traversal)
-
-
-# ============================================================
-# 3D Level Design & GReFormer LLM Commands
-# ============================================================
-
-func _cmd_spawn_3d_object(params: Dictionary) -> Variant:
-	var type_name := str(params.get("type", "MeshInstance3D"))
-	var obj_name := str(params.get("name", "New3DObject"))
-	var parent_path := str(params.get("parent_path", "/root"))
-	
-	var parent_node := get_node_or_null(parent_path)
-	if not parent_node:
-		parent_node = get_tree().edited_scene_root if get_tree().edited_scene_root else get_tree().root
-		
-	if not parent_node:
-		return {"status": "error", "error": "Parent node not found: " + parent_path}
-		
-	var new_node: Node3D = null
-	if ClassDB.can_instantiate(type_name):
-		var inst := ClassDB.instantiate(type_name)
-		if inst is Node3D:
-			new_node = inst as Node3D
-			
-	if not new_node:
-		if type_name == "GReFormerNode3D":
-			var greformer_script = load("res://addons/greformer/core/greformer_node.gd")
-			if greformer_script:
-				new_node = Node3D.new()
-				new_node.set_script(greformer_script)
-		else:
-			new_node = MeshInstance3D.new()
-			
-	new_node.name = obj_name
-	parent_node.add_child(new_node)
-	if get_tree().edited_scene_root:
-		new_node.owner = get_tree().edited_scene_root
-		
-	if params.has("position"):
-		new_node.global_position = _parse_vector3(params["position"])
-	if params.has("rotation"):
-		new_node.global_rotation = _parse_vector3(params["rotation"])
-	if params.has("scale"):
-		new_node.scale = _parse_vector3(params["scale"])
-		
-	return {
-		"status": "ok",
-		"name": str(new_node.name),
-		"path": str(new_node.get_path()),
-		"position": _serialize(new_node.global_position)
-	}
-
-func _cmd_transform_3d_node(params: Dictionary) -> Variant:
-	var node_path := str(params.get("node_path", ""))
-	var target_node := get_node_or_null(node_path) as Node3D
-	if not target_node:
-		return {"status": "error", "error": "3D Node not found: " + node_path}
-		
-	var relative := bool(params.get("relative", false))
-	
-	if params.has("position"):
-		var pos_val := _parse_vector3(params["position"])
-		if relative:
-			target_node.global_position += pos_val
-		else:
-			target_node.global_position = pos_val
-			
-	if params.has("rotation"):
-		var rot_val := _parse_vector3(params["rotation"])
-		if relative:
-			target_node.global_rotation += rot_val
-		else:
-			target_node.global_rotation = rot_val
-			
-	if params.has("scale"):
-		var scale_val := _parse_vector3(params["scale"])
-		if relative:
-			target_node.scale *= scale_val
-		else:
-			target_node.scale = scale_val
-			
-	return {
-		"status": "ok",
-		"path": str(target_node.get_path()),
-		"position": _serialize(target_node.global_position),
-		"rotation": _serialize(target_node.global_rotation),
-		"scale": _serialize(target_node.scale)
-	}
-
-func _cmd_inspect_level_layout(params: Dictionary) -> Variant:
-	var center := _parse_vector3(params.get("center_position", Vector3.ZERO))
-	var radius := float(params.get("radius", 20.0))
-	var root_path := str(params.get("node_path", "/root"))
-	
-	var root_node := get_node_or_null(root_path)
-	if not root_node:
-		root_node = get_tree().root
-		
-	var results: Array = []
-	_collect_level_3d_nodes(root_node, center, radius, results)
-	return {"status": "ok", "nodes": results, "count": results.size()}
-
-func _collect_level_3d_nodes(node: Node, center: Vector3, radius: float, results: Array) -> void:
-	if node is Node3D:
-		var n3d := node as Node3D
-		var dist := n3d.global_position.distance_to(center)
-		if dist <= radius:
-			var info: Dictionary = {
-				"name": str(n3d.name),
-				"type": n3d.get_class(),
-				"path": str(n3d.get_path()),
-				"position": _serialize(n3d.global_position),
-				"rotation": _serialize(n3d.global_rotation),
-				"scale": _serialize(n3d.scale),
-				"distance": dist
-			}
-			if n3d is MeshInstance3D and (n3d as MeshInstance3D).mesh:
-				info["mesh_type"] = (n3d as MeshInstance3D).mesh.get_class()
-			results.append(info)
-			
-	for child in node.get_children():
-		_collect_level_3d_nodes(child, center, radius, results)
-
-func _cmd_duplicate_3d_node(params: Dictionary) -> Variant:
-	var node_path := str(params.get("node_path", ""))
-	var src_node := get_node_or_null(node_path) as Node3D
-	if not src_node:
-		return {"status": "error", "error": "3D Node not found: " + node_path}
-		
-	var clone := src_node.duplicate() as Node3D
-	if params.has("new_name"):
-		clone.name = str(params["new_name"])
-		
-	var parent := src_node.get_parent()
-	if parent:
-		parent.add_child(clone)
-		if get_tree().edited_scene_root:
-			clone.owner = get_tree().edited_scene_root
-			
-	if params.has("offset_position"):
-		clone.global_position += _parse_vector3(params["offset_position"])
-		
-	return {
-		"status": "ok",
-		"name": str(clone.name),
-		"path": str(clone.get_path()),
-		"position": _serialize(clone.global_position)
-	}
-
-func _cmd_greformer_create(params: Dictionary) -> Variant:
-	var prim_type_str := str(params.get("primitive_type", "Box"))
-	var obj_name := str(params.get("name", "GReFormer_Object"))
-	var pos := _parse_vector3(params.get("position", Vector3.ZERO))
-	
-	var greformer_script = load("res://addons/greformer/core/greformer_node.gd")
-	if not greformer_script:
-		return {"status": "error", "error": "GReFormer script not found at res://addons/greformer/core/greformer_node.gd"}
-		
-	var node: Node3D = Node3D.new()
-	node.set_script(greformer_script)
-	node.name = obj_name
-	
-	var edited_root := get_tree().edited_scene_root if get_tree().edited_scene_root else get_tree().root
-	edited_root.add_child(node)
-	if get_tree().edited_scene_root:
-		node.owner = get_tree().edited_scene_root
-		
-	node.global_position = pos
-	
-	var ptype := 1 # BOX
-	if prim_type_str.findn("stair") != -1:
-		ptype = 2
-	elif prim_type_str.findn("cylin") != -1:
-		ptype = 3
-		
-	if node.has_method("generate_primitive"):
-		node.call("generate_primitive", ptype)
-		
-	return {"status": "ok", "name": str(node.name), "path": str(node.get_path()), "position": _serialize(node.global_position)}
-
-func _cmd_greformer_push_pull(params: Dictionary) -> Variant:
-	var node_path := str(params.get("node_path", ""))
-	var face_idx := int(params.get("face_index", 0))
-	var distance := float(params.get("distance", 1.0))
-	
-	var node := get_node_or_null(node_path)
-	if not node or not node.has_method("push_pull_selected_face"):
-		return {"status": "error", "error": "GReFormer node not found or invalid: " + node_path}
-		
-	node.set("selected_face_index", face_idx)
-	node.call("push_pull_selected_face", distance)
-	return {"status": "ok", "path": node_path, "face_index": face_idx, "distance": distance}
-
-func _cmd_greformer_apply_hotspot(params: Dictionary) -> Variant:
-	var node_path := str(params.get("node_path", ""))
-	var face_idx := int(params.get("face_index", 0))
-	var region_name := str(params.get("region_name", "Wood_Plank"))
-	
-	var node := get_node_or_null(node_path)
-	if not node:
-		return {"status": "error", "error": "GReFormer node not found: " + node_path}
-		
-	var greformer_mesh = node.get("greformer_mesh")
-	if not greformer_mesh or not greformer_mesh.has_method("apply_hotspot_uv"):
-		return {"status": "error", "error": "GReFormer mesh data uninitialized"}
-		
-	var hotspot_tool_script = load("res://addons/greformer/tools/uv_hotspot_tool.gd")
-	if hotspot_tool_script:
-		var tool_inst = hotspot_tool_script.new()
-		tool_inst.call("apply_region_to_node_face", node, face_idx, region_name)
-		
-	return {"status": "ok", "path": node_path, "face_index": face_idx, "region_name": region_name}
-
-func _cmd_greformer_bake(params: Dictionary) -> Variant:
-	var node_path := str(params.get("node_path", ""))
-	var node := get_node_or_null(node_path)
-	if not node or not node.has_method("bake_mesh_to_static"):
-		return {"status": "error", "error": "GReFormer node not found or invalid: " + node_path}
-		
-	var baked: Node3D = node.call("bake_mesh_to_static")
-	if not baked:
-		return {"status": "error", "error": "Failed to bake GReFormer mesh"}
-		
-	return {"status": "ok", "baked_path": str(baked.get_path()), "baked_name": str(baked.name)}
-
-func _cmd_greformer_export_obj(params: Dictionary) -> Variant:
-	var node_path := str(params.get("node_path", ""))
-	var output_path := str(params.get("output_path", "res://exported_mesh.obj"))
-	
-	var node := get_node_or_null(node_path) as GReFormerNode3D
-	if not node:
-		return {"status": "error", "error": "GReFormer node not found: " + node_path}
-		
-	var exporter_script = load("res://addons/greformer/tools/obj_exporter.gd")
-	if exporter_script:
-		var err: Error = exporter_script.call("export_to_obj", node, output_path)
-		if err == OK:
-			return {"status": "ok", "path": node_path, "output_path": output_path}
-			
-	return {"status": "error", "error": "Failed to export OBJ"}
-
-func _cmd_greformer_create_preset(params: Dictionary) -> Variant:
-	var preset_name := str(params.get("preset", "Wall"))
-	var obj_name := str(params.get("name", "GReFormer_Preset"))
-	var pos := _parse_vector3(params.get("position", Vector3.ZERO))
-	
-	var library_script = load("res://addons/greformer/tools/blockout_library.gd")
-	var greformer_script = load("res://addons/greformer/core/greformer_node.gd")
-	if not library_script or not greformer_script:
-		return {"status": "error", "error": "GReFormer preset library scripts not loaded"}
-		
-	var ptype := 0 # WALL
-	if preset_name.findn("ramp") != -1: ptype = 1
-	elif preset_name.findn("pillar") != -1: ptype = 2
-	elif preset_name.findn("arch") != -1: ptype = 3
-	elif preset_name.findn("door") != -1: ptype = 4
-	
-	var mesh_res: ArrayMesh = library_script.call("create_preset_mesh", ptype)
-	var edited_root := get_tree().edited_scene_root if get_tree().edited_scene_root else get_tree().root
-	
-	var node: Node3D = Node3D.new()
-	node.set_script(greformer_script)
-	node.name = obj_name
-	edited_root.add_child(node)
-	if get_tree().edited_scene_root:
-		node.owner = get_tree().edited_scene_root
-		
-	node.global_position = pos
-	node.mesh = mesh_res
-	var gmesh = node.get("greformer_mesh")
-	if gmesh:
-		gmesh.call("load_from_array_mesh", mesh_res)
-		
-	return {"status": "ok", "name": str(node.name), "path": str(node.get_path()), "preset": preset_name}
-
-func _cmd_greformer_snap_grid(params: Dictionary) -> Variant:
-	var node_path := str(params.get("node_path", ""))
-	var step := float(params.get("step", 1.0))
-	var node := get_node_or_null(node_path) as Node3D
-	if not node:
-		return {"status": "error", "error": "Node3D not found: " + node_path}
-		
-	var snap_tool = load("res://addons/greformer/tools/snap_alignment_tool.gd")
-	if snap_tool:
-		snap_tool.call("snap_node_to_grid", node, step)
-		return {"status": "ok", "path": node_path, "position": _serialize(node.global_position), "step": step}
-		
-	return {"status": "error", "error": "Failed to load snap alignment tool"}
-
-func _cmd_greformer_carve_hole(params: Dictionary) -> Variant:
-	var node_path := str(params.get("node_path", ""))
-	var hole_type := str(params.get("hole_type", "door")) # "door" or "window"
-	var node := get_node_or_null(node_path) as GReFormerNode3D
-	if not node:
-		return {"status": "error", "error": "GReFormer node not found: " + node_path}
-		
-	var boolean_tool = load("res://addons/greformer/tools/boolean_mesh_tool.gd")
-	if boolean_tool:
-		if hole_type.findn("win") != -1:
-			boolean_tool.call("carve_window_hole", node)
-		else:
-			boolean_tool.call("carve_doorway_hole", node)
-		return {"status": "ok", "path": node_path, "hole_type": hole_type}
-		
-	return {"status": "error", "error": "Failed to load boolean mesh tool"}
-
-func _parse_vector3(val: Variant) -> Vector3:
-	if val is Vector3:
-		return val
-	if val is Dictionary:
-		var d := val as Dictionary
-		return Vector3(float(d.get("x", 0)), float(d.get("y", 0)), float(d.get("z", 0)))
-	if val is Array and (val as Array).size() >= 3:
-		var a := val as Array
-		return Vector3(float(a[0]), float(a[1]), float(a[2]))
-	if val is String:
-		var parts := (val as String).split(",")
-		if parts.size() >= 3:
-			return Vector3(parts[0].to_float(), parts[1].to_float(), parts[2].to_float())
-	return Vector3.ZERO
-
-
-func _cmd_undo(_params: Dictionary) -> Dictionary:
-	_add_log("info", "Executed Undo operation")
-	return {"status": "ok", "message": "Undo executed"}
-
-func _cmd_redo(_params: Dictionary) -> Dictionary:
-	_add_log("info", "Executed Redo operation")
-	return {"status": "ok", "message": "Redo executed"}
-
-func _cmd_fuzzy_find_node(params: Dictionary) -> Dictionary:
-	var query: String = str(params.get("query", "")).to_lower().strip_edges()
-	var root_node: Node = get_tree().current_scene if get_tree().current_scene else get_tree().root
-	var matches: Array = []
-	_fuzzy_search_recursive(root_node, query, matches)
-	return {"status": "ok", "data": {"query": query, "count": matches.size(), "matches": matches}}
-
-func _fuzzy_search_recursive(node: Node, query: String, results: Array) -> void:
-	var name_lower := node.name.to_lower()
-	if query.is_empty() or name_lower.contains(query):
-		results.append({
-			"name": str(node.name),
-			"type": node.get_class(),
-			"path": str(node.get_path())
-		})
-	for child in node.get_children():
-		_fuzzy_search_recursive(child, query, results)
-
-func _cmd_profile_performance(_params: Dictionary) -> Dictionary:
-	var fps := Performance.get_monitor(Performance.TIME_FPS)
-	var process_time := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
-	var physics_time := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
-	var draw_calls := Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)
-	var orphan_nodes := Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT)
-	var static_mem := Performance.get_monitor(Performance.MEMORY_STATIC)
-
-	var alerts: Array = []
-	if orphan_nodes > 0:
-		alerts.append("Warning: %d orphan nodes detected in memory!" % orphan_nodes)
-	if fps < 50.0:
-		alerts.append("Warning: Low FPS (%.1f)" % fps)
-
-	return {"status": "ok", "data": {
-		"fps": fps,
-		"process_time_ms": process_time,
-		"physics_time_ms": physics_time,
-		"draw_calls": draw_calls,
-		"orphan_nodes": orphan_nodes,
-		"static_memory_bytes": static_mem,
-		"alerts": alerts
-	}}
-
-
-func _cmd_greformer_set_shading(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("node_path", ""))
-	var mode: String = str(params.get("mode", "smooth")).to_lower()
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is MeshInstance3D):
-		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-	_add_log("info", "Set shading mode to %s on %s" % [mode, node_path])
-	return {"status": "ok", "data": {"node": node_path, "shading_mode": mode}}
-
-func _cmd_greformer_paint_color(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("node_path", ""))
-	var color_str: String = str(params.get("color", "#FFFFFF"))
-	var face_index: int = int(params.get("face_index", 0))
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is MeshInstance3D):
-		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-	_add_log("info", "Painted face %d with color %s on %s" % [face_index, color_str, node_path])
-	return {"status": "ok", "data": {"node": node_path, "face": face_index, "color": color_str}}
-
-func _cmd_greformer_export_gltf(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("node_path", ""))
-	var output_path: String = str(params.get("output_path", "res://exported_mesh.gltf"))
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is Node3D):
-		return {"status": "error", "error": "Node3D not found: " + node_path}
-	var document := GLTFDocument.new()
-	var state := GLTFState.new()
-	var err := document.append_from_scene(node, state)
-	if err == OK:
-		var abs_out := ProjectSettings.globalize_path(output_path)
-		err = document.write_to_filesystem(state, abs_out)
-		if err == OK:
-			return {"status": "ok", "data": {"node": node_path, "output_path": output_path, "format": "GLTF"}}
-	return {"status": "error", "error": "Failed to export GLTF: " + error_string(err)}
-
-func _cmd_greformer_bevel_edges(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("node_path", ""))
-	var radius: float = float(params.get("radius", 0.1))
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is MeshInstance3D):
-		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-	_add_log("info", "Beveled edges with radius %.2f on %s" % [radius, node_path])
-	return {"status": "ok", "data": {"node": node_path, "radius": radius}}
-
-func _cmd_greformer_generate_stairs(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("node_path", ""))
-	var steps: int = int(params.get("steps", 10))
-	var height: float = float(params.get("height", 3.0))
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is MeshInstance3D):
-		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-	_add_log("info", "Generated procedural stairs (%d steps, %.2fm height) on %s" % [steps, height, node_path])
-	return {"status": "ok", "data": {"node": node_path, "steps": steps, "total_height": height}}
-
-func _cmd_inspect_resources(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("path", ""))
-	var node := get_node_or_null(node_path)
-	if node == null:
-		return {"status": "error", "error": "Node not found: " + node_path}
-	var res_list: Array = []
-	for p in node.get_property_list():
-		var val = node.get(p.get("name"))
-		if val is Resource:
-			var res := val as Resource
-			res_list.append({
-				"property": str(p.get("name")),
-				"type": res.get_class(),
-				"resource_path": res.resource_path if res.resource_path else "in_memory"
-			})
-	return {"status": "ok", "data": {"node": node_path, "count": res_list.size(), "resources": res_list}}
-
-func _cmd_record_metrics(params: Dictionary) -> Dictionary:
-	var duration: float = float(params.get("duration", 1.0))
-	var fps := Performance.get_monitor(Performance.TIME_FPS)
-	var process_time := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
-	var physics_time := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
-	var draw_calls := Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)
-	var vram := Performance.get_monitor(Performance.RENDER_TEXTURE_MEM_USED)
-	return {"status": "ok", "data": {
-		"duration_sec": duration,
-		"fps": fps,
-		"process_time_ms": process_time,
-		"physics_time_ms": physics_time,
-		"draw_calls": draw_calls,
-		"vram_bytes": vram
-	}}
-
-func _cmd_version(_params: Dictionary) -> Dictionary:
-	return {"status": "ok", "data": {
-		"engine_version": Engine.get_version_info()["string"],
-		"major": Engine.get_version_info()["major"],
-		"minor": Engine.get_version_info()["minor"],
-		"patch": Engine.get_version_info()["patch"],
-		"os_name": OS.get_name(),
-		"locale": OS.get_locale(),
-		"is_debug": OS.is_debug_build()
-	}}
-
-func _cmd_clear_logs(_params: Dictionary) -> Dictionary:
-	var cleared := _log_buffer.size()
-	_log_buffer.clear()
-	return {"status": "ok", "data": {"cleared_logs": cleared}}
-
-func _cmd_inspect_children(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("path", ""))
-	var depth: int = int(params.get("depth", 1))
-	var node := get_node_or_null(node_path)
-	if node == null:
-		node = get_tree().current_scene if get_tree().current_scene else get_tree().root
-	var children: Array = []
-	for child in node.get_children():
-		var info: Dictionary = {
-			"name": str(child.name),
-			"type": child.get_class(),
-			"path": str(child.get_path())
-		}
-		if child is Node2D: info["position"] = _serialize((child as Node2D).position)
-		elif child is Node3D: info["position"] = _serialize((child as Node3D).position)
-		children.append(info)
-	return {"status": "ok", "data": {"parent": str(node.get_path()), "count": children.size(), "children": children}}
-
-
-
-
