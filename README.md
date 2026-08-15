@@ -14,6 +14,8 @@ This repository is Ultimate Odycer's security-focused fork of [mattias800/godot-
 
 The executable is named **`uo-godot-cli`** to avoid colliding with the unrelated `godot-cli` package from [IvanMurzak/Godot-MCP](https://github.com/IvanMurzak/Godot-MCP).
 
+[Why this fork](#why-this-fork) · [Architecture](#architecture) · [Quick start](#quick-start) · [Command guide](#command-guide) · [Security modes](#security-modes) · [Validation evidence](#validation-evidence)
+
 ## Why this fork
 
 - **Safe by default:** authenticated, loopback-only, debug-only, and read-only at startup.
@@ -26,6 +28,16 @@ The executable is named **`uo-godot-cli`** to avoid colliding with the unrelated
 - **Strict process ownership:** managed start, status, logs, and stop verify the token, executable, PID, and a random instance marker.
 - **One-shot scene proof:** loads one bounded scene in safe mode, checks structure and logs, fingerprints source files, then stops the owned runtime.
 - **Optional FoveaCore bridge:** validated splat discovery and live-scene insertion without saving the scene.
+
+### Choose a workflow
+
+| Goal | Start here | Starts Godot | Token required |
+|---|---|---:|---:|
+| Audit a project before touching it | `project preflight` | No | No |
+| Compare CLI and `godot_ai` capabilities | `project compatibility` | No | Only with `--live` |
+| Start and own one local runtime | `runtime start` | Yes | Yes |
+| Prove one scene and stop cleanly | `scene validate` | Yes | Yes |
+| Run an allowlisted project test | `test list`, then `test run` | Runner-dependent | No runtime token |
 
 ## Architecture
 
@@ -70,7 +82,7 @@ The runtime addon exposes 34 protocol commands. `uo-godot-cli commands` returns 
 ### 1. Build the local executable
 
 ```bash
-npm ci
+npm ci --ignore-scripts
 npm run build
 npm link
 uo-godot-cli --version
@@ -460,13 +472,3 @@ Run `uo-godot-cli --version`. The bare executable may resolve to Godot-MCP rathe
 **Addon install refuses an existing copy**
 
 Inspect `uo-godot-cli addon status <project>`. Use `--force` only after reviewing the reported divergence.
-
-## License
-
-MIT. This security-focused fork is based on
-[mattias800/godot-cli](https://github.com/mattias800/godot-cli); see
-[`LICENSE`](LICENSE) for the full terms.
-
-Contributions should preserve the local-only, authenticated, fail-closed
-boundary described in [`SECURITY.md`](SECURITY.md). See
-[`CONTRIBUTING.md`](CONTRIBUTING.md) for the validation gates.
