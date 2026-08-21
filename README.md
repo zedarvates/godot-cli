@@ -6,7 +6,7 @@
 
 **Ultimate Odycer Open Ecosystem** - Local-first, server-authoritative, production-ready game foundations.
 
-[Visit ultimateodycer.com](https://ultimateodycer.com) · [Star this repository](https://github.com/zedarvates/godot-cli/stargazers)
+[Visit ultimateodycer.com](https://ultimateodycer.com) · [Join Discord](https://discord.gg/Mdcdjb6bU) · [Star this repository](https://github.com/zedarvates/godot-cli/stargazers)
 
 </div>
 
