@@ -36,7 +36,12 @@ export class GodotClient {
       }, timeoutMs);
 
       socket.connect(this.port, this.host, () => {
-        const message = JSON.stringify({ id, command, params }) + "\n";
+        // PATCH 01: the hardened addon (cli_server.gd:_handle_message) rejects any
+        // request without a matching `token`. Ported from the `codex/uo7-hardened-release`
+        // branch's client.ts, which already does this.
+        const token = (process.env.GODOT_CLI_TOKEN ?? "").trim();
+        const message =
+          JSON.stringify({ id, token, command, params }) + "\n";
         socket.write(message);
       });
 

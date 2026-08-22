@@ -84,10 +84,15 @@ var _listen_port := DEFAULT_PORT
 var _server: TCPServer = null
 var _clients: Array[Dictionary] = []
 var _pending_waits: Array[Dictionary] = []
+var _log_buffer: Array[Dictionary] = []
 
 # --- Lifecycle ---
 
 func _ready() -> void:
+	# PATCH 03: without this the autoload's _process() stops whenever the game
+	# pauses (get_tree().paused = true), which silently wedges the TCP server
+	# with no way to recover except restarting the engine.
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	if not OS.is_debug_build():
 		push_error("GodotCLI: Refusing to start outside an editor or debug build")
 		set_process(false)
@@ -1067,7 +1072,7 @@ func _cmd_list_files(params: Dictionary) -> Dictionary:
 
 	var dir := DirAccess.open(abs_path)
 	if dir == null:
-		return {"status": "error", "error": "Cannot open directory: " + error_string(DirAccess.get_dir_access_error())}
+		return {"status": "error", "error": "Cannot open directory: " + error_string(DirAccess.get_open_error())}
 
 	var files: Array = []
 	var dirs: Array = []
@@ -2083,7 +2088,7 @@ func _cmd_greformer_export_obj(params: Dictionary) -> Variant:
 	var node_path := str(params.get("node_path", ""))
 	var output_path := str(params.get("output_path", "res://exported_mesh.obj"))
 	
-	var node := get_node_or_null(node_path) as GReFormerNode3D
+	var node := get_node_or_null(node_path) as Node3D
 	if not node:
 		return {"status": "error", "error": "GReFormer node not found: " + node_path}
 		
@@ -2146,7 +2151,7 @@ func _cmd_greformer_snap_grid(params: Dictionary) -> Variant:
 func _cmd_greformer_carve_hole(params: Dictionary) -> Variant:
 	var node_path := str(params.get("node_path", ""))
 	var hole_type := str(params.get("hole_type", "door")) # "door" or "window"
-	var node := get_node_or_null(node_path) as GReFormerNode3D
+	var node := get_node_or_null(node_path) as Node3D
 	if not node:
 		return {"status": "error", "error": "GReFormer node not found: " + node_path}
 		
@@ -2170,9 +2175,23 @@ func _parse_vector3(val: Variant) -> Vector3:
 		var a := val as Array
 		return Vector3(float(a[0]), float(a[1]), float(a[2]))
 	if val is String:
-		var parts := (val as String).split(",")
+		# PATCH 04: the documented "Vector3(x, y, z)" form was split on "," without
+		# stripping the constructor wrapper, so parts[0] was "Vector3(7" and
+		# to_float() silently yielded 0 -- the X component was dropped on every
+		# spawn-3d / transform-3d / inspect-level call while still returning status ok.
+		var text := (val as String).strip_edges()
+		if text.begins_with("Vector3("):
+			text = text.substr(8)
+		if text.ends_with(")"):
+			text = text.substr(0, text.length() - 1)
+		text = text.lstrip("([").rstrip(")]")
+		var parts := text.split(",")
 		if parts.size() >= 3:
-			return Vector3(parts[0].to_float(), parts[1].to_float(), parts[2].to_float())
+			return Vector3(
+				parts[0].strip_edges().to_float(),
+				parts[1].strip_edges().to_float(),
+				parts[2].strip_edges().to_float()
+			)
 	return Vector3.ZERO
 
 
@@ -2324,6 +2343,19 @@ func _cmd_version(_params: Dictionary) -> Dictionary:
 		"locale": OS.get_locale(),
 		"is_debug": OS.is_debug_build()
 	}}
+
+
+# PATCH 02: _add_log() is called in 6 places but was never defined.
+const MAX_LOG_ENTRIES := 512
+
+func _add_log(level: String, message: String) -> void:
+	_log_buffer.append({
+		"level": level,
+		"message": message,
+		"timestamp_ms": Time.get_ticks_msec(),
+	})
+	while _log_buffer.size() > MAX_LOG_ENTRIES:
+		_log_buffer.remove_at(0)
 
 func _cmd_clear_logs(_params: Dictionary) -> Dictionary:
 	var cleared := _log_buffer.size()
