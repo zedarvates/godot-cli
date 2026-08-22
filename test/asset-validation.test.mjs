@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -33,6 +34,23 @@ function buildGlb(document) {
   glb.writeUInt32LE(0x4e4f534a, 16);
   chunk.copy(glb, 20);
   return glb;
+}
+
+function runCli(args, env = process.env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["dist/cli.js", ...args], {
+      cwd: new URL("..", import.meta.url),
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
+    child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
+    child.once("error", reject);
+    child.once("exit", (code) => resolve({ code, stdout, stderr }));
+  });
 }
 
 test("static validation accepts a minimal project-local glTF 2.0 asset", async (t) => {
@@ -480,4 +498,36 @@ test("asset policy rejects unknown fields and inconsistent collision requirement
       name
     );
   }
+});
+
+test("asset validate CLI emits JSON and preserves validation exit status", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "good.gltf"),
+    JSON.stringify({ asset: { version: "2.0" } }),
+    "utf8"
+  );
+  await fs.writeFile(path.join(project, "bad.gltf"), "{", "utf8");
+
+  const good = await runCli([
+    "asset",
+    "validate",
+    "res://good.gltf",
+    "--project",
+    project,
+  ]);
+  assert.equal(good.code, 0, `${good.stdout}\n${good.stderr}`);
+  assert.equal(good.stderr, "");
+  assert.equal(JSON.parse(good.stdout).status, "ok");
+
+  const bad = await runCli([
+    "asset",
+    "validate",
+    "res://bad.gltf",
+    "--project",
+    project,
+  ]);
+  assert.equal(bad.code, 1, `${bad.stdout}\n${bad.stderr}`);
+  assert.equal(bad.stderr, "");
+  assert.equal(JSON.parse(bad.stdout).status, "error");
 });
