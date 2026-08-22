@@ -1050,6 +1050,24 @@ program
   });
 
 program
+  .command("greformer-shading")
+  .description("Set smooth or flat shading on a MeshInstance3D by regenerating its normals")
+  .argument("<node-path>", "Path to MeshInstance3D")
+  .option("--mode <mode>", "smooth or flat", "smooth")
+  .action(async (nodePath: string, opts: { mode: string }) => {
+    await run("greformer_set_shading", { node_path: nodePath, mode: opts.mode });
+  });
+
+program
+  .command("greformer-paint")
+  .description("Set the albedo colour of a MeshInstance3D")
+  .argument("<node-path>", "Path to MeshInstance3D")
+  .option("--color <color>", "HTML colour, e.g. #33CC66", "#FFFFFF")
+  .action(async (nodePath: string, opts: { color: string }) => {
+    await run("greformer_paint_color", { node_path: nodePath, color: opts.color });
+  });
+
+program
   .command("greformer-bevel")
   .description("Bevel / chamfer edges of a GReFormer node")
   .argument("<node-path>", "Path to GReFormer node")

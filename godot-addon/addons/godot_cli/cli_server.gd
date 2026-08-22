@@ -474,6 +474,12 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"query_point":
 			_queue_physics_query("point", params, client, id)
 			return null  # Response is deferred to _physics_process
+		"export_project_api": return _cmd_export_project_api(params)
+		"greformer_generate_terrain": return _cmd_greformer_generate_terrain(params)
+		"greformer_generate_tunnel": return _cmd_greformer_generate_tunnel(params)
+		"greformer_generate_archway": return _cmd_greformer_generate_archway(params)
+		"greformer_generate_collision": return _cmd_greformer_generate_collision(params)
+		"greformer_array_duplicate": return _cmd_greformer_array_duplicate(params)
 		"capture_sequence":
 			_cmd_capture_sequence(params, client, id)
 			return null  # Response is deferred until all frames are captured
@@ -2562,8 +2568,11 @@ func _cmd_emit_signal(params: Dictionary) -> Dictionary:
 	for conn in node.get_signal_connection_list(signal_name):
 		connection_count += 1
 
+	# Object.emit_signal() returns ERR_UNAVAILABLE when the signal has no connections.
+	# The signal's existence was already validated above, so that is a normal outcome
+	# for an unobserved signal -- not a failure.
 	var err = node.callv("emit_signal", call_args)
-	if err is int and int(err) != OK:
+	if err is int and int(err) != OK and int(err) != ERR_UNAVAILABLE:
 		return {"status": "error", "error": "emit_signal failed: " + error_string(int(err))}
 
 	_add_log("info", "Emitted signal %s on %s" % [signal_name, node_path])
@@ -2965,14 +2974,392 @@ func _cmd_highlight_node(params: Dictionary, client: Dictionary, id: String) -> 
 		"expires_at_ms": Time.get_ticks_msec() + int(duration * 1000.0),
 	})
 
+# ============================================================
+# Procedural mesh helpers
+# ============================================================
+
+const BOX_FACES := [
+	[Vector3(-1, -1, 1), Vector3(1, -1, 1), Vector3(1, 1, 1), Vector3(-1, 1, 1)],      # +Z
+	[Vector3(1, -1, -1), Vector3(-1, -1, -1), Vector3(-1, 1, -1), Vector3(1, 1, -1)],  # -Z
+	[Vector3(1, -1, 1), Vector3(1, -1, -1), Vector3(1, 1, -1), Vector3(1, 1, 1)],      # +X
+	[Vector3(-1, -1, -1), Vector3(-1, -1, 1), Vector3(-1, 1, 1), Vector3(-1, 1, -1)],  # -X
+	[Vector3(-1, 1, 1), Vector3(1, 1, 1), Vector3(1, 1, -1), Vector3(-1, 1, -1)],      # +Y
+	[Vector3(-1, -1, -1), Vector3(1, -1, -1), Vector3(1, -1, 1), Vector3(-1, -1, 1)],  # -Y
+]
+
+
+func _add_quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> void:
+	st.add_vertex(a)
+	st.add_vertex(b)
+	st.add_vertex(c)
+	st.add_vertex(a)
+	st.add_vertex(c)
+	st.add_vertex(d)
+
+
+func _add_box(st: SurfaceTool, center: Vector3, size: Vector3) -> void:
+	var half := size * 0.5
+	for face in BOX_FACES:
+		_add_quad(
+			st,
+			center + face[0] * half,
+			center + face[1] * half,
+			center + face[2] * half,
+			center + face[3] * half
+		)
+
+
+func _commit_generated_mesh(st: SurfaceTool, node_name: String, parent: Node) -> MeshInstance3D:
+	st.generate_normals()
+	st.generate_tangents()
+	var instance := MeshInstance3D.new()
+	instance.name = node_name
+	instance.mesh = st.commit()
+	parent.add_child(instance)
+	if get_tree().edited_scene_root:
+		instance.owner = get_tree().edited_scene_root
+	return instance
+
+
+func _resolve_generation_parent(params: Dictionary) -> Node:
+	var parent_path := str(params.get("parent", "/root"))
+	var parent := get_node_or_null(parent_path)
+	if parent == null:
+		parent = get_tree().current_scene if get_tree().current_scene else get_tree().root
+	return parent
+
+
+## Returns an editable SurfaceTool seeded from a MeshInstance3D's current surface,
+## or null when the node has no committed geometry to read back.
+func _surface_tool_from(instance: MeshInstance3D) -> SurfaceTool:
+	if instance.mesh == null:
+		return null
+	var array_mesh := instance.mesh
+	if not array_mesh is ArrayMesh:
+		var converter := SurfaceTool.new()
+		converter.create_from(instance.mesh, 0)
+		var committed := converter.commit()
+		if committed == null:
+			return null
+		array_mesh = committed
+	if (array_mesh as ArrayMesh).get_surface_count() == 0:
+		return null
+	var st := SurfaceTool.new()
+	st.create_from(array_mesh, 0)
+	return st
+
+# ============================================================
+# Procedural generation commands
+# ============================================================
+
+func _cmd_greformer_generate_terrain(params: Dictionary) -> Dictionary:
+	var grid_width := clampi(int(params.get("grid_width", params.get("width", 16))), 1, 128)
+	var grid_depth := clampi(int(params.get("grid_depth", params.get("depth", 16))), 1, 128)
+	var max_height := float(params.get("max_height", params.get("height", 3.0)))
+	var cell_size := float(params.get("cell_size", 1.0))
+	var noise_seed := int(params.get("seed", 0))
+	var parent := _resolve_generation_parent(params)
+
+	var noise := FastNoiseLite.new()
+	noise.seed = noise_seed
+	noise.frequency = float(params.get("frequency", 0.08))
+
+	var heights: Array = []
+	for x in range(grid_width + 1):
+		var row: Array = []
+		for z in range(grid_depth + 1):
+			row.append(noise.get_noise_2d(float(x), float(z)) * max_height)
+		heights.append(row)
+
+	var origin := Vector3(-grid_width * cell_size * 0.5, 0.0, -grid_depth * cell_size * 0.5)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for x in range(grid_width):
+		for z in range(grid_depth):
+			var p00 := origin + Vector3(x * cell_size, heights[x][z], z * cell_size)
+			var p10 := origin + Vector3((x + 1) * cell_size, heights[x + 1][z], z * cell_size)
+			var p11 := origin + Vector3((x + 1) * cell_size, heights[x + 1][z + 1], (z + 1) * cell_size)
+			var p01 := origin + Vector3(x * cell_size, heights[x][z + 1], (z + 1) * cell_size)
+			# Wound so generate_normals() produces +Y normals; the reverse order leaves
+			# the surface back-face culled when viewed from above.
+			_add_quad(st, p00, p10, p11, p01)
+
+	var instance := _commit_generated_mesh(st, str(params.get("name", "Terrain")), parent)
+	instance.position = _parse_vector3(params.get("position", Vector3.ZERO))
+	_add_log("info", "Generated %dx%d terrain under %s" % [grid_width, grid_depth, parent.get_path()])
+	return {"status": "ok", "data": {
+		"path": str(instance.get_path()),
+		"grid_width": grid_width,
+		"grid_depth": grid_depth,
+		"max_height": max_height,
+		"seed": noise_seed,
+		"vertex_count": instance.mesh.surface_get_array_len(0),
+	}}
+
+
+func _cmd_greformer_generate_archway(params: Dictionary) -> Dictionary:
+	var width := maxf(float(params.get("width", 3.0)), 0.1)
+	var height := maxf(float(params.get("height", 4.0)), 0.2)
+	var depth := maxf(float(params.get("depth", 1.0)), 0.05)
+	var segments := clampi(int(params.get("segments", 12)), 3, 64)
+	var parent := _resolve_generation_parent(params)
+
+	var radius := width * 0.5
+	var leg_height := maxf(height - radius, 0.05)
+	var thickness := maxf(float(params.get("thickness", 0.4)), 0.05)
+	var half_depth := depth * 0.5
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	# Two vertical legs
+	for side in [-1.0, 1.0]:
+		_add_box(
+			st,
+			Vector3(side * (radius + thickness * 0.5), leg_height * 0.5, 0.0),
+			Vector3(thickness, leg_height, depth)
+		)
+
+	# Semicircular arch band spanning the legs
+	for i in range(segments):
+		var a0 := PI * float(i) / float(segments)
+		var a1 := PI * float(i + 1) / float(segments)
+		var inner0 := Vector3(cos(a0) * radius, leg_height + sin(a0) * radius, 0.0)
+		var inner1 := Vector3(cos(a1) * radius, leg_height + sin(a1) * radius, 0.0)
+		var outer0 := Vector3(
+			cos(a0) * (radius + thickness),
+			leg_height + sin(a0) * (radius + thickness),
+			0.0
+		)
+		var outer1 := Vector3(
+			cos(a1) * (radius + thickness),
+			leg_height + sin(a1) * (radius + thickness),
+			0.0
+		)
+		var front := Vector3(0.0, 0.0, half_depth)
+		var back := Vector3(0.0, 0.0, -half_depth)
+		_add_quad(st, outer0 + front, outer1 + front, inner1 + front, inner0 + front)
+		_add_quad(st, inner0 + back, inner1 + back, outer1 + back, outer0 + back)
+		_add_quad(st, outer0 + back, outer1 + back, outer1 + front, outer0 + front)
+		_add_quad(st, inner0 + front, inner1 + front, inner1 + back, inner0 + back)
+
+	var instance := _commit_generated_mesh(st, str(params.get("name", "Archway")), parent)
+	instance.position = _parse_vector3(params.get("position", Vector3.ZERO))
+	_add_log("info", "Generated archway under %s" % parent.get_path())
+	return {"status": "ok", "data": {
+		"path": str(instance.get_path()),
+		"width": width,
+		"height": height,
+		"depth": depth,
+		"segments": segments,
+		"vertex_count": instance.mesh.surface_get_array_len(0),
+	}}
+
+
+func _cmd_greformer_generate_tunnel(params: Dictionary) -> Dictionary:
+	var length := maxf(float(params.get("length", 10.0)), 0.1)
+	var width := maxf(float(params.get("width", 4.0)), 0.1)
+	var height := maxf(float(params.get("height", 3.0)), 0.1)
+	var segments := clampi(int(params.get("segments", 16)), 3, 64)
+	var parent := _resolve_generation_parent(params)
+
+	var radius_x := width * 0.5
+	var half_length := length * 0.5
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	# Inward-facing half-pipe: the walls you see from inside the tunnel.
+	for i in range(segments):
+		var a0 := PI * float(i) / float(segments)
+		var a1 := PI * float(i + 1) / float(segments)
+		var p0 := Vector3(cos(a0) * radius_x, sin(a0) * height, 0.0)
+		var p1 := Vector3(cos(a1) * radius_x, sin(a1) * height, 0.0)
+		var back := Vector3(0.0, 0.0, -half_length)
+		var front := Vector3(0.0, 0.0, half_length)
+		_add_quad(st, p0 + back, p0 + front, p1 + front, p1 + back)
+
+	var instance := _commit_generated_mesh(st, str(params.get("name", "Tunnel")), parent)
+	instance.position = _parse_vector3(params.get("position", Vector3.ZERO))
+	_add_log("info", "Generated tunnel under %s" % parent.get_path())
+	return {"status": "ok", "data": {
+		"path": str(instance.get_path()),
+		"length": length,
+		"width": width,
+		"height": height,
+		"segments": segments,
+		"vertex_count": instance.mesh.surface_get_array_len(0),
+	}}
+
+
+func _cmd_greformer_generate_collision(params: Dictionary) -> Dictionary:
+	var node_path := str(params.get("node_path", ""))
+	var mode := str(params.get("mode", "trimesh")).to_lower()
+	var node := get_node_or_null(node_path)
+	if node == null or not (node is MeshInstance3D):
+		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
+	var instance := node as MeshInstance3D
+	if instance.mesh == null:
+		return {"status": "error", "error": "Node has no mesh to build collision from: " + node_path}
+
+	var before: Array[String] = []
+	for child in instance.get_children():
+		before.append(str(child.name))
+
+	if mode.begins_with("convex"):
+		instance.create_convex_collision()
+	elif mode.begins_with("tri") or mode.begins_with("concave"):
+		instance.create_trimesh_collision()
+	else:
+		return {"status": "error", "error": "Unknown collision mode '%s'; expected trimesh or convex" % mode}
+
+	var created: Array[String] = []
+	for child in instance.get_children():
+		if not before.has(str(child.name)):
+			created.append(str(child.get_path()))
+			if get_tree().edited_scene_root:
+				_set_owner_recursive(child, get_tree().edited_scene_root)
+
+	if created.is_empty():
+		return {"status": "error", "error": "Collision generation produced no body"}
+
+	_add_log("info", "Generated %s collision for %s" % [mode, node_path])
+	return {"status": "ok", "data": {"node": node_path, "mode": mode, "created": created}}
+
+
+func _cmd_greformer_array_duplicate(params: Dictionary) -> Dictionary:
+	var node_path := str(params.get("node_path", ""))
+	var mode := str(params.get("mode", "linear")).to_lower()
+	var count := clampi(int(params.get("count", 3)), 1, 128)
+	var source := get_node_or_null(node_path)
+	if source == null or not (source is Node3D):
+		return {"status": "error", "error": "3D node not found: " + node_path}
+	var src := source as Node3D
+	var parent := src.get_parent()
+	if parent == null:
+		return {"status": "error", "error": "Node has no parent to duplicate into: " + node_path}
+
+	var offset := _parse_vector3(params.get("offset", Vector3(2.0, 0.0, 0.0)))
+	var radius := float(params.get("radius", 4.0))
+	var created: Array[String] = []
+
+	for i in range(1, count + 1):
+		var clone := src.duplicate() as Node3D
+		clone.name = "%s_%d" % [str(src.name), i]
+		parent.add_child(clone)
+		if get_tree().edited_scene_root:
+			_set_owner_recursive(clone, get_tree().edited_scene_root)
+		if mode.begins_with("rad"):
+			var angle := TAU * float(i) / float(count + 1)
+			clone.global_position = src.global_position + Vector3(
+				cos(angle) * radius, 0.0, sin(angle) * radius
+			)
+			clone.rotate_y(angle)
+		else:
+			clone.global_position = src.global_position + offset * float(i)
+		created.append(str(clone.get_path()))
+
+	_add_log("info", "Array-duplicated %s x%d (%s)" % [node_path, count, mode])
+	return {"status": "ok", "data": {
+		"source": node_path,
+		"mode": mode,
+		"count": created.size(),
+		"created": created,
+	}}
+
+# ============================================================
+# Project API export
+# ============================================================
+
+func _collect_gd_scripts(dir_path: String, out: Array) -> void:
+	if out.size() >= MAX_DIRECTORY_ENTRIES:
+		return
+	var dir := DirAccess.open(dir_path)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while entry != "":
+		if entry.begins_with("."):
+			entry = dir.get_next()
+			continue
+		var full := dir_path.path_join(entry)
+		if dir.current_is_dir():
+			if entry != "addons":
+				_collect_gd_scripts(full, out)
+		elif entry.ends_with(".gd"):
+			out.append(full)
+		entry = dir.get_next()
+	dir.list_dir_end()
+
+
+func _cmd_export_project_api(params: Dictionary) -> Dictionary:
+	var root := str(params.get("path", "res://"))
+	var abs_root := _resolve_project_path(root)
+	if abs_root.is_empty():
+		return {"status": "error", "error": "Path must stay inside res://"}
+
+	var paths: Array = []
+	_collect_gd_scripts(abs_root, paths)
+
+	var scripts: Array = []
+	for path in paths:
+		var script = load(path)
+		if script == null or not script is Script:
+			continue
+		var gd := script as Script
+		var methods: Array = []
+		for m in gd.get_script_method_list():
+			var args: Array = []
+			for a in m.get("args", []):
+				args.append({
+					"name": str(a.get("name", "")),
+					"type": type_string(int(a.get("type", TYPE_NIL))),
+				})
+			methods.append({
+				"name": str(m.get("name", "")),
+				"args": args,
+				"return_type": type_string(int(m.get("return", {}).get("type", TYPE_NIL))),
+			})
+		var signals: Array = []
+		for sg in gd.get_script_signal_list():
+			signals.append({"name": str(sg.get("name", ""))})
+		var properties: Array = []
+		for pr in gd.get_script_property_list():
+			var prop_name := str(pr.get("name", ""))
+			if prop_name.is_empty() or prop_name.ends_with(".gd"):
+				continue
+			properties.append({
+				"name": prop_name,
+				"type": type_string(int(pr.get("type", TYPE_NIL))),
+			})
+		scripts.append({
+			"path": path,
+			"class_name": str(gd.get_global_name()),
+			"base_type": str(gd.get_instance_base_type()),
+			"methods": methods,
+			"signals": signals,
+			"properties": properties,
+		})
+
+	return {"status": "ok", "data": {
+		"scripts": scripts,
+		"count": scripts.size(),
+		"searched_from": root,
+		"truncated": paths.size() >= MAX_DIRECTORY_ENTRIES,
+	}}
+
 func _cmd_undo(_params: Dictionary) -> Dictionary:
-	_add_log("info", "Executed Undo operation")
-	return {"status": "ok", "message": "Undo executed"}
-
+	# There is no undo stack behind this at runtime -- UndoRedo is an editor facility
+	# and the addon runs inside the game. Reporting ok would be a lie.
+	return {
+		"status": "error",
+		"error": "undo is not supported at runtime: the addon runs inside the running game, which has no UndoRedo history",
+	}
 func _cmd_redo(_params: Dictionary) -> Dictionary:
-	_add_log("info", "Executed Redo operation")
-	return {"status": "ok", "message": "Redo executed"}
-
+	return {
+		"status": "error",
+		"error": "redo is not supported at runtime: the addon runs inside the running game, which has no UndoRedo history",
+	}
 func _cmd_fuzzy_find_node(params: Dictionary) -> Dictionary:
 	var query: String = str(params.get("query", "")).to_lower().strip_edges()
 	var root_node: Node = get_tree().current_scene if get_tree().current_scene else get_tree().root
@@ -3022,30 +3409,66 @@ func _cmd_greformer_set_shading(params: Dictionary) -> Dictionary:
 	var node := get_node_or_null(node_path)
 	if node == null or not (node is MeshInstance3D):
 		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-	_add_log("info", "Set shading mode to %s on %s" % [mode, node_path])
-	return {"status": "ok", "data": {"node": node_path, "shading_mode": mode}}
+	if mode != "smooth" and mode != "flat":
+		return {"status": "error", "error": "Unknown shading mode '%s'; expected smooth or flat" % mode}
+	var instance := node as MeshInstance3D
+	var st := _surface_tool_from(instance)
+	if st == null:
+		return {"status": "error", "error": "Node has no readable surface geometry: " + node_path}
 
+	# Flat shading needs per-face normals, so drop the shared-vertex index buffer first.
+	if mode == "flat":
+		st.deindex()
+	st.generate_normals()
+	st.generate_tangents()
+	instance.mesh = st.commit()
+
+	_add_log("info", "Set shading mode to %s on %s" % [mode, node_path])
+	return {"status": "ok", "data": {
+		"node": node_path,
+		"shading_mode": mode,
+		"vertex_count": instance.mesh.surface_get_array_len(0),
+	}}
 func _cmd_greformer_paint_color(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("node_path", ""))
 	var color_str: String = str(params.get("color", "#FFFFFF"))
-	var face_index: int = int(params.get("face_index", 0))
 	var node := get_node_or_null(node_path)
 	if node == null or not (node is MeshInstance3D):
 		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-	_add_log("info", "Painted face %d with color %s on %s" % [face_index, color_str, node_path])
-	return {"status": "ok", "data": {"node": node_path, "face": face_index, "color": color_str}}
+	if not Color.html_is_valid(color_str.lstrip("#")):
+		return {"status": "error", "error": "Invalid colour: " + color_str}
+	var color := Color.html(color_str.lstrip("#"))
+	var instance := node as MeshInstance3D
 
+	var material := instance.material_override as StandardMaterial3D
+	if material == null:
+		material = StandardMaterial3D.new()
+	material.albedo_color = color
+	instance.material_override = material
+
+	_add_log("info", "Painted %s with colour %s" % [node_path, color_str])
+	return {"status": "ok", "data": {
+		"node": node_path,
+		"color": color_str,
+		"albedo": _serialize(color),
+	}}
 func _cmd_greformer_export_gltf(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("node_path", ""))
 	var output_path: String = str(params.get("output_path", "res://exported_mesh.gltf"))
 	var node := get_node_or_null(node_path)
 	if node == null or not (node is Node3D):
 		return {"status": "error", "error": "Node3D not found: " + node_path}
+	# C4: output_path went straight to globalize_path() with no containment check,
+	# so this wrote anywhere the process could write -- and it was ungated, so it did
+	# so even in read-only mode. Use the same res:// containment every other file
+	# command applies.
+	var abs_out := _resolve_project_path(output_path)
+	if abs_out.is_empty():
+		return {"status": "error", "error": "Output path must stay inside res://"}
 	var document := GLTFDocument.new()
 	var state := GLTFState.new()
 	var err := document.append_from_scene(node, state)
 	if err == OK:
-		var abs_out := ProjectSettings.globalize_path(output_path)
 		err = document.write_to_filesystem(state, abs_out)
 		if err == OK:
 			return {"status": "ok", "data": {"node": node_path, "output_path": output_path, "format": "GLTF"}}
@@ -3053,23 +3476,63 @@ func _cmd_greformer_export_gltf(params: Dictionary) -> Dictionary:
 
 func _cmd_greformer_bevel_edges(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("node_path", ""))
-	var radius: float = float(params.get("radius", 0.1))
 	var node := get_node_or_null(node_path)
 	if node == null or not (node is MeshInstance3D):
 		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-	_add_log("info", "Beveled edges with radius %.2f on %s" % [radius, node_path])
-	return {"status": "ok", "data": {"node": node_path, "radius": radius}}
-
+	# Previously this logged a line and returned ok having changed nothing. Real edge
+	# bevelling needs adjacency analysis that this addon does not implement, and a
+	# false success is worse for a calling agent than an explicit refusal.
+	return {
+		"status": "error",
+		"error": "greformer-bevel is not implemented: edge bevelling requires mesh adjacency analysis that this addon does not provide",
+	}
 func _cmd_greformer_generate_stairs(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("node_path", ""))
-	var steps: int = int(params.get("steps", 10))
-	var height: float = float(params.get("height", 3.0))
-	var node := get_node_or_null(node_path)
-	if node == null or not (node is MeshInstance3D):
-		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-	_add_log("info", "Generated procedural stairs (%d steps, %.2fm height) on %s" % [steps, height, node_path])
-	return {"status": "ok", "data": {"node": node_path, "steps": steps, "total_height": height}}
+	var steps := clampi(int(params.get("steps", 8)), 1, 128)
+	var step_width := maxf(float(params.get("width", 2.0)), 0.05)
+	var total_height := maxf(float(params.get("height", 0.25)) * float(steps), 0.05)
+	var step_depth := maxf(float(params.get("depth", 0.4)), 0.05)
+	var railings := bool(params.get("railings", false))
+	var parent := _resolve_generation_parent(params)
 
+	var step_height := total_height / float(steps)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in range(steps):
+		# Each tread is a solid box running from the ground up to its own height, so
+		# the staircase reads as a solid ramp rather than floating slabs.
+		var rise := step_height * float(i + 1)
+		_add_box(
+			st,
+			Vector3(0.0, rise * 0.5, -step_depth * (float(i) + 0.5)),
+			Vector3(step_width, rise, step_depth)
+		)
+	if railings:
+		var rail_thickness := 0.08
+		var rail_height := 0.9
+		for side in [-1.0, 1.0]:
+			for i in range(steps):
+				var rise := step_height * float(i + 1)
+				_add_box(
+					st,
+					Vector3(
+						side * (step_width * 0.5 - rail_thickness * 0.5),
+						rise + rail_height * 0.5,
+						-step_depth * (float(i) + 0.5)
+					),
+					Vector3(rail_thickness, rail_height, step_depth)
+				)
+
+	var instance := _commit_generated_mesh(st, str(params.get("name", "Stairs")), parent)
+	instance.position = _parse_vector3(params.get("position", Vector3.ZERO))
+	_add_log("info", "Generated %d-step staircase under %s" % [steps, parent.get_path()])
+	return {"status": "ok", "data": {
+		"path": str(instance.get_path()),
+		"steps": steps,
+		"total_height": total_height,
+		"step_depth": step_depth,
+		"railings": railings,
+		"vertex_count": instance.mesh.surface_get_array_len(0),
+	}}
 func _cmd_inspect_resources(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var node := get_node_or_null(node_path)
