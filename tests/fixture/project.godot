@@ -1,0 +1,9 @@
+; Minimal fixture project for the integration test. install-addon fills in the
+; [editor_plugins], [autoload] and [debug] sections.
+config_version=5
+
+[application]
+
+config/name="godot-cli-integration-fixture"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.6", "Forward Plus")

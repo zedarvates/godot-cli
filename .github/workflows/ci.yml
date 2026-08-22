@@ -2,9 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [ main, feature/* ]
+    branches: [ main, 'feature/**', 'fix/**' ]
+  # Deliberately unfiltered. Work reaches this repo through the long-lived
+  # feature/* branches, so `branches: [ main ]` meant a pull request into one of
+  # them ran no checks at all.
   pull_request:
-    branches: [ main ]
 
 jobs:
   build-and-test:
@@ -31,3 +33,37 @@ jobs:
 
       - name: Run unit test suite
         run: npm test
+
+  integration:
+    runs-on: ubuntu-latest
+    # The unit suite talks to fake TCP servers and never loads cli_server.gd, so it
+    # cannot see an addon that fails to compile or a client/server contract mismatch.
+    # This job launches a real headless Godot and exercises the round trip.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Install Godot
+        env:
+          GODOT_VERSION: 4.6-stable
+        run: |
+          curl -sSLo godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}_linux.x86_64.zip"
+          unzip -q godot.zip
+          mv Godot_v${GODOT_VERSION}_linux.x86_64 "${RUNNER_TEMP}/godot"
+          chmod +x "${RUNNER_TEMP}/godot"
+
+      - name: Run integration test against a real engine
+        env:
+          GODOT_BIN: ${{ runner.temp }}/godot
+        run: node --test dist/tests/integration.test.js

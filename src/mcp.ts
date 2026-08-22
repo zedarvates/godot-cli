@@ -340,7 +340,10 @@ export async function runMcpServer(options: { host?: string; port?: string | num
         type: "object",
         properties: {
           node_path: { type: "string", description: "GReFormer node path" },
-          color: { type: "array", description: "RGB color tuple [r, g, b]" },
+          color: {
+            description:
+              "HTML hex string ('#33CC66'), [r, g, b] or [r, g, b, a] array of 0-1 floats, or a 'Color(r, g, b, a)' expression",
+          },
           face_index: { type: "number", description: "Face index (-1 for entire mesh)" },
         },
         required: ["node_path"],
@@ -522,6 +525,18 @@ export async function runMcpServer(options: { host?: string; port?: string | num
       inputSchema: { type: "object", properties: {} },
     },
     {
+      name: "godot_commands",
+      description:
+        "List every command the server accepts and the environment gate each one requires. Use this to discover capability before planning a sequence of calls.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "godot_server_info",
+      description:
+        "Report the protocol version, which environment gates are currently open, and the server's size and count limits.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
       name: "godot_inspect_node_children",
       description: "Inspect direct or nested child nodes under a target path.",
       inputSchema: {
@@ -550,7 +565,7 @@ export async function runMcpServer(options: { host?: string; port?: string | num
         sendResponse(id, {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "godot-cli-mcp", version: "0.3.0" },
+          serverInfo: { name: "godot-cli-mcp", version: "0.4.0" },
         });
       } else if (method === "tools/list") {
         sendResponse(id, { tools });
@@ -613,6 +628,8 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_record_metrics": commandName = "record_metrics"; break;
           case "godot_version": commandName = "version"; break;
           case "godot_clear_logs": commandName = "clear_logs"; break;
+          case "godot_commands": commandName = "commands"; break;
+          case "godot_server_info": commandName = "server_info"; break;
           case "godot_inspect_node_children": commandName = "inspect_children"; break;
           default:
             sendError(id, -32601, `Unknown tool: ${toolName}`);
