@@ -152,3 +152,205 @@ test("static validation bounds JSON nesting", async (t) => {
   assert.match(report.findings[0].message, /depth limit/);
   assert.equal(report.integrity.unchanged, true);
 });
+
+test("static validation fingerprints the bounded local dependency closure", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(path.join(project, "mesh.bin"), Buffer.alloc(12, 7));
+  await fs.writeFile(
+    path.join(project, "texture.png"),
+    Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03,
+      0x08, 0x06, 0x00, 0x00, 0x00,
+    ])
+  );
+  await fs.writeFile(
+    path.join(project, "model.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      buffers: [{ uri: "mesh.bin", byteLength: 12 }],
+      images: [{ uri: "texture.png", mimeType: "image/png" }],
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://model.gltf",
+    env: {},
+  });
+
+  assert.equal(report.status, "ok");
+  assert.deepEqual(
+    report.closure.files.map((file) => [file.resourcePath, file.kind]),
+    [
+      ["res://model.gltf", "root"],
+      ["res://mesh.bin", "buffer"],
+      ["res://texture.png", "image"],
+    ]
+  );
+  assert.equal(report.closure.fileCount, 3);
+  assert.equal(report.metrics.declaredBufferBytes, 12);
+});
+
+test("static validation rejects non-local and escaping dependency URIs", async (t) => {
+  const project = await createProject(t);
+  const uris = [
+    "https://host/a.bin",
+    "//host/a.bin",
+    "file:///a.bin",
+    "data:application/octet-stream;base64,AA==",
+    "/absolute.bin",
+    "C:\\absolute.bin",
+    "../outside.bin",
+    "%2e%2e/outside.bin",
+  ];
+
+  for (const [index, uri] of uris.entries()) {
+    const name = `forbidden-${index}.gltf`;
+    await fs.writeFile(
+      path.join(project, name),
+      JSON.stringify({
+        asset: { version: "2.0" },
+        buffers: [{ uri, byteLength: 1 }],
+      }),
+      "utf8"
+    );
+    const report = await validateAsset({
+      project,
+      asset: `res://${name}`,
+      env: {},
+    });
+    assert.equal(report.status, "error", uri);
+    assert.ok(
+      report.findings.some((finding) => finding.code === "ASSET_URI_FORBIDDEN"),
+      uri
+    );
+    assert.equal(report.closure.fileCount, 1, uri);
+  }
+});
+
+test("static validation rejects out-of-range glTF indices at stable locations", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "indices.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      scene: 1,
+      scenes: [{ nodes: [1] }],
+      nodes: [{ mesh: 1 }],
+      meshes: [{ primitives: [{ indices: 1, material: 1 }] }],
+      accessors: [{}],
+      materials: [{}],
+      textures: [{ source: 1, sampler: 1 }],
+      images: [{}],
+      samplers: [{}],
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://indices.gltf",
+    env: {},
+  });
+
+  assert.equal(report.status, "error");
+  assert.deepEqual(
+    report.findings
+      .filter((finding) => finding.code === "ASSET_REFERENCE_OUT_OF_RANGE")
+      .map((finding) => finding.location),
+    [
+      "/meshes/0/primitives/0/indices",
+      "/meshes/0/primitives/0/material",
+      "/nodes/0/mesh",
+      "/scene",
+      "/scenes/0/nodes/0",
+      "/textures/0/sampler",
+      "/textures/0/source",
+    ]
+  );
+});
+
+test("static validation reads bounded PNG and JPEG dimensions without decoding pixels", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "two-by-three.png"),
+    Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03,
+      0x08, 0x06, 0x00, 0x00, 0x00,
+    ])
+  );
+  await fs.writeFile(
+    path.join(project, "four-by-five.jpg"),
+    Buffer.from([
+      0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x05,
+      0x00, 0x04, 0x01, 0x01, 0x11, 0x00, 0xff, 0xd9,
+    ])
+  );
+  await fs.writeFile(
+    path.join(project, "images.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      images: [
+        { uri: "two-by-three.png", mimeType: "image/png" },
+        { uri: "four-by-five.jpg", mimeType: "image/jpeg" },
+      ],
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://images.gltf",
+    env: {},
+  });
+
+  assert.equal(report.status, "ok");
+  assert.deepEqual(report.images, [
+    {
+      resourcePath: "res://two-by-three.png",
+      mimeType: "image/png",
+      width: 2,
+      height: 3,
+    },
+    {
+      resourcePath: "res://four-by-five.jpg",
+      mimeType: "image/jpeg",
+      width: 4,
+      height: 5,
+    },
+  ]);
+});
+
+test("static validation derives triangle-list metrics from accessor counts", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "triangles.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      accessors: [{ count: 4 }, { count: 6 }],
+      meshes: [
+        {
+          primitives: [
+            { mode: 4, attributes: { POSITION: 0 }, indices: 1 },
+          ],
+        },
+      ],
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://triangles.gltf",
+    env: {},
+  });
+
+  assert.equal(report.status, "ok");
+  assert.deepEqual(report.metrics.primitiveModes, { "4": 1 });
+  assert.deepEqual(report.metrics.triangles, { value: 2, reason: null });
+});
