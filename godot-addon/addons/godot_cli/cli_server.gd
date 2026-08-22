@@ -2292,6 +2292,29 @@ func _parse_vector2(val: Variant) -> Vector2:
 	return Vector2.ZERO
 
 
+## Accepts every colour form the rest of the API already speaks: a Color, an
+## [r, g, b] / [r, g, b, a] array (the shape the MCP schema advertises), a
+## {"_type": "Color"} dict or a "Color(r, g, b, a)" expression, and an HTML hex
+## string with or without the leading '#'. Returns null when none of them parse,
+## so callers can report the input back rather than silently painting white.
+func _parse_colour(val: Variant) -> Variant:
+	if val is Color:
+		return val
+	if val is Array:
+		var a := val as Array
+		if a.size() >= 3:
+			return Color(float(a[0]), float(a[1]), float(a[2]), float(a[3]) if a.size() >= 4 else 1.0)
+		return null
+	var decoded = _deserialize(val)
+	if decoded is Color:
+		return decoded
+	if val is String:
+		var html := (val as String).strip_edges().lstrip("#")
+		if Color.html_is_valid(html):
+			return Color.html(html)
+	return null
+
+
 # ============================================================
 # Performance metrics
 # ============================================================
@@ -3431,13 +3454,15 @@ func _cmd_greformer_set_shading(params: Dictionary) -> Dictionary:
 	}}
 func _cmd_greformer_paint_color(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("node_path", ""))
-	var color_str: String = str(params.get("color", "#FFFFFF"))
+	var raw_colour: Variant = params.get("color", "#FFFFFF")
+	var color_str := str(raw_colour)
 	var node := get_node_or_null(node_path)
 	if node == null or not (node is MeshInstance3D):
 		return {"status": "error", "error": "MeshInstance3D not found: " + node_path}
-	if not Color.html_is_valid(color_str.lstrip("#")):
-		return {"status": "error", "error": "Invalid colour: " + color_str}
-	var color := Color.html(color_str.lstrip("#"))
+	var parsed = _parse_colour(raw_colour)
+	if parsed == null:
+		return {"status": "error", "error": "Invalid colour: " + color_str + " (expected an HTML hex string, [r, g, b] array, or Color(r, g, b, a))"}
+	var color := parsed as Color
 	var instance := node as MeshInstance3D
 
 	var material := instance.material_override as StandardMaterial3D

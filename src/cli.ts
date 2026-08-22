@@ -1062,7 +1062,7 @@ program
   .command("greformer-paint")
   .description("Set the albedo colour of a MeshInstance3D")
   .argument("<node-path>", "Path to MeshInstance3D")
-  .option("--color <color>", "HTML colour, e.g. #33CC66", "#FFFFFF")
+  .option("--color <color>", "HTML hex (#33CC66) or a Color(r, g, b, a) expression", "#FFFFFF")
   .action(async (nodePath: string, opts: { color: string }) => {
     await run("greformer_paint_color", { node_path: nodePath, color: opts.color });
   });

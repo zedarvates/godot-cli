@@ -190,6 +190,21 @@ test(
       assert.equal(data.error_count, 1);
     });
 
+    await t.test("colours are accepted in every documented form", async () => {
+      // The MCP schema advertises an [r, g, b] array while the server took only
+      // HTML hex, so a client following the declared contract was rejected.
+      const target = "/root/Main/Ground/MeshInstance3D";
+      for (const color of [[1, 0, 0], "#FF0000", "Color(1, 0, 0, 1)"]) {
+        const res = await client.send("greformer_paint_color", { node_path: target, color });
+        assert.equal(res.status, "ok", `${JSON.stringify(color)} -> ${res.error}`);
+        const albedo = (res.data as any).albedo;
+        assert.equal(albedo.r, 1);
+        assert.equal(albedo.g, 0);
+      }
+      const bad = await client.send("greformer_paint_color", { node_path: target, color: "not-a-colour" });
+      assert.equal(bad.status, "error");
+    });
+
     await t.test("the server survives the game being paused", async () => {
       // The autoload used to inherit PROCESS_MODE_INHERIT, so pausing stopped the
       // _process() that polls the socket -- wedging the tool with no way back.

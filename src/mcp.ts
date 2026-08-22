@@ -340,7 +340,10 @@ export async function runMcpServer(options: { host?: string; port?: string | num
         type: "object",
         properties: {
           node_path: { type: "string", description: "GReFormer node path" },
-          color: { type: "array", description: "RGB color tuple [r, g, b]" },
+          color: {
+            description:
+              "HTML hex string ('#33CC66'), [r, g, b] or [r, g, b, a] array of 0-1 floats, or a 'Color(r, g, b, a)' expression",
+          },
           face_index: { type: "number", description: "Face index (-1 for entire mesh)" },
         },
         required: ["node_path"],
