@@ -3,3 +3,4 @@ dist/
 *.js.map
 screenshot.png
 .godot/
+.worktrees/
