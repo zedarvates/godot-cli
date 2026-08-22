@@ -165,6 +165,14 @@ function arrayLength(value: unknown): number {
   return Array.isArray(value) ? value.length : 0;
 }
 
+function pathIdentity(value: string): string {
+  return process.platform === "win32" ? value.toLowerCase() : value;
+}
+
+function hasTraversalSegment(value: string): boolean {
+  return value.replaceAll("\\", "/").split("/").some((segment) => segment === "..");
+}
+
 function emptyMetrics(): AssetMetrics {
   return {
     scenes: 0,
@@ -190,6 +198,19 @@ async function resolveAsset(
 ): Promise<ResolvedAsset> {
   if (!resourcePath.startsWith("res://")) {
     throw new Error("Asset validation requires a res:// path");
+  }
+  let decodedResourcePath: string;
+  try {
+    decodedResourcePath = decodeURIComponent(resourcePath.slice("res://".length));
+  } catch {
+    throw new Error("Asset validation path contains invalid percent encoding");
+  }
+  if (
+    resourcePath.includes("\\") ||
+    hasTraversalSegment(resourcePath.slice("res://".length)) ||
+    hasTraversalSegment(decodedResourcePath)
+  ) {
+    throw new Error("Asset validation path must not contain traversal segments");
   }
   const extension = path.posix.extname(resourcePath).toLowerCase();
   if (extension !== ".gltf" && extension !== ".glb") {
@@ -596,6 +617,39 @@ function validateReferences(
   }
 }
 
+function validateArrayContainers(
+  gltf: Record<string, unknown>,
+  findings: AssetFinding[]
+): void {
+  const arrayFields = [
+    "accessors",
+    "animations",
+    "buffers",
+    "bufferViews",
+    "cameras",
+    "extensionsRequired",
+    "extensionsUsed",
+    "images",
+    "materials",
+    "meshes",
+    "nodes",
+    "samplers",
+    "scenes",
+    "skins",
+    "textures",
+  ];
+  for (const field of arrayFields) {
+    if (gltf[field] !== undefined && !Array.isArray(gltf[field])) {
+      findings.push({
+        severity: "error",
+        code: "ASSET_CONTAINER_INVALID",
+        location: `/${field}`,
+        message: `glTF ${field} must be an array when present`,
+      });
+    }
+  }
+}
+
 function dependencyUri(uri: string, location: string): string {
   if (
     /^[A-Za-z][A-Za-z0-9+.-]*:/.test(uri) ||
@@ -629,7 +683,9 @@ function dependencyUri(uri: string, location: string): string {
     decoded.includes("\\") ||
     decoded.startsWith("/") ||
     decoded.startsWith("//") ||
-    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(decoded)
+    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(decoded) ||
+    hasTraversalSegment(uri) ||
+    hasTraversalSegment(decoded)
   ) {
     throw new AssetValidationError(
       "ASSET_URI_FORBIDDEN",
@@ -741,7 +797,7 @@ async function collectClosure(
       kind: "root",
     },
   ];
-  const seen = new Set([root.absolutePath.toLowerCase()]);
+  const seen = new Set([pathIdentity(root.absolutePath)]);
   const declarations: Array<{
     uri: string;
     kind: "buffer" | "image";
@@ -778,7 +834,7 @@ async function collectClosure(
         declaration.kind,
         declaration.location
       );
-      const identity = dependency.absolutePath.toLowerCase();
+      const identity = pathIdentity(dependency.absolutePath);
       if (seen.has(identity)) continue;
       if (files.length >= MAX_ASSET_CLOSURE_FILES) {
         throw new AssetValidationError(
@@ -879,7 +935,7 @@ async function collectImageMetadata(
 ): Promise<AssetImageMetadata[]> {
   if (!Array.isArray(gltf.images)) return [];
   const canonicalProject = await fs.realpath(projectRoot);
-  const byPath = new Map(closure.map((file) => [file.absolutePath.toLowerCase(), file]));
+  const byPath = new Map(closure.map((file) => [pathIdentity(file.absolutePath), file]));
   const result: AssetImageMetadata[] = [];
   for (const [index, image] of gltf.images.entries()) {
     if (!isRecord(image) || typeof image.uri !== "string") {
@@ -901,7 +957,7 @@ async function collectImageMetadata(
       result.push({ resourcePath: null, mimeType: null, width: null, height: null });
       continue;
     }
-    const dependency = byPath.get(canonical.toLowerCase());
+    const dependency = byPath.get(pathIdentity(canonical));
     const declaredMime = typeof image.mimeType === "string" ? image.mimeType : null;
     if (!dependency) {
       result.push({ resourcePath: null, mimeType: declaredMime, width: null, height: null });
@@ -1131,6 +1187,7 @@ export async function validateAsset(
     const bytes = await fs.readFile(resolved.absolutePath);
     const gltf = resolved.format === "glb" ? parseGlb(bytes) : parseGltf(bytes);
     metrics = collectMetrics(gltf);
+    validateArrayContainers(gltf, findings);
     validateReferences(gltf, findings);
     closure = await collectClosure(
       discovery.projectRoot,
@@ -1204,6 +1261,9 @@ export async function validateAsset(
         logs: imported.logs,
         cleanup: imported.cleanup,
       };
+      if (loadedPolicy?.require_godot_import === true && !imported.complete) {
+        if (policyReport !== null) policyReport.passed = false;
+      }
       if (
         loadedPolicy?.require_collision_nodes === true &&
         (imported.summary?.collisionShapes ?? 0) === 0

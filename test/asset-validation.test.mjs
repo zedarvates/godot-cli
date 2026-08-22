@@ -111,7 +111,7 @@ test("asset root resolution rejects traversal and unsupported extensions before 
         asset: "res://../outside.gltf",
         env: {},
       }),
-    /must stay inside/
+    /traversal|must stay inside/
   );
   await assert.rejects(
     () =>
@@ -530,4 +530,94 @@ test("asset validate CLI emits JSON and preserves validation exit status", async
   assert.equal(bad.code, 1, `${bad.stdout}\n${bad.stderr}`);
   assert.equal(bad.stderr, "");
   assert.equal(JSON.parse(bad.stdout).status, "error");
+});
+
+test("static validation rejects malformed glTF array containers", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "containers.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      scenes: {},
+      nodes: "not-an-array",
+      meshes: 7,
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://containers.gltf",
+    env: {},
+  });
+  assert.equal(report.status, "error");
+  assert.deepEqual(
+    report.findings
+      .filter((finding) => finding.code === "ASSET_CONTAINER_INVALID")
+      .map((finding) => finding.location),
+    ["/meshes", "/nodes", "/scenes"]
+  );
+});
+
+test("asset and dependency paths reject traversal segments even when normalization stays inside", async (t) => {
+  const project = await createProject(t);
+  await fs.mkdir(path.join(project, "sub"));
+  await fs.writeFile(path.join(project, "mesh.bin"), Buffer.alloc(1));
+  await fs.writeFile(
+    path.join(project, "model.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      buffers: [{ uri: "sub/../mesh.bin", byteLength: 1 }],
+    }),
+    "utf8"
+  );
+
+  await assert.rejects(
+    () =>
+      validateAsset({
+        project,
+        asset: "res://sub/../model.gltf",
+        env: {},
+      }),
+    /traversal/
+  );
+  const report = await validateAsset({
+    project,
+    asset: "res://model.gltf",
+    env: {},
+  });
+  assert.equal(report.status, "error");
+  assert.ok(
+    report.findings.some((finding) => finding.code === "ASSET_URI_FORBIDDEN")
+  );
+});
+
+test("policy requiring Godot import fails when the requested import is incomplete", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "model.gltf"),
+    JSON.stringify({ asset: { version: "2.0" } }),
+    "utf8"
+  );
+  await fs.writeFile(
+    path.join(project, "policy.json"),
+    JSON.stringify({
+      schema: "uo-godot-asset-policy/1",
+      require_godot_import: true,
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://model.gltf",
+    policy: "res://policy.json",
+    godotImport: true,
+    godot: path.join(project, "missing-godot.exe"),
+    timeoutMs: 100,
+    env: {},
+  });
+  assert.equal(report.status, "error");
+  assert.equal(report.proof.godotImport.status, "error");
+  assert.equal(report.policy.passed, false);
 });
