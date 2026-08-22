@@ -648,6 +648,58 @@ function validateArrayContainers(
       });
     }
   }
+
+  const requireNestedArray = (
+    owner: Record<string, unknown>,
+    key: string,
+    location: string
+  ) => {
+    if (owner[key] !== undefined && !Array.isArray(owner[key])) {
+      findings.push({
+        severity: "error",
+        code: "ASSET_CONTAINER_INVALID",
+        location: `${location}/${key}`,
+        message: `glTF ${location}/${key} must be an array when present`,
+      });
+    }
+  };
+  const inspect = (
+    field: string,
+    callback: (owner: Record<string, unknown>, location: string) => void
+  ) => {
+    const values = gltf[field];
+    if (!Array.isArray(values)) return;
+    for (const [index, value] of values.entries()) {
+      if (isRecord(value)) callback(value, `/${field}/${index}`);
+    }
+  };
+
+  inspect("scenes", (scene, location) => requireNestedArray(scene, "nodes", location));
+  inspect("nodes", (node, location) => {
+    for (const key of ["children", "matrix", "translation", "rotation", "scale", "weights"]) {
+      requireNestedArray(node, key, location);
+    }
+  });
+  inspect("meshes", (mesh, location) => {
+    requireNestedArray(mesh, "primitives", location);
+    requireNestedArray(mesh, "weights", location);
+    if (Array.isArray(mesh.primitives)) {
+      for (const [index, primitive] of mesh.primitives.entries()) {
+        if (isRecord(primitive)) {
+          requireNestedArray(primitive, "targets", `${location}/primitives/${index}`);
+        }
+      }
+    }
+  });
+  inspect("skins", (skin, location) => requireNestedArray(skin, "joints", location));
+  inspect("animations", (animation, location) => {
+    requireNestedArray(animation, "samplers", location);
+    requireNestedArray(animation, "channels", location);
+  });
+  inspect("accessors", (accessor, location) => {
+    requireNestedArray(accessor, "min", location);
+    requireNestedArray(accessor, "max", location);
+  });
 }
 
 function dependencyUri(uri: string, location: string): string {

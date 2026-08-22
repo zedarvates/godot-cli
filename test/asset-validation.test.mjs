@@ -559,6 +559,42 @@ test("static validation rejects malformed glTF array containers", async (t) => {
   );
 });
 
+test("static validation rejects malformed nested glTF array containers", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "nested-containers.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      scenes: [{ nodes: {} }],
+      nodes: [{ children: "not-an-array" }],
+      meshes: [{ primitives: {} }],
+      skins: [{ joints: {} }],
+      animations: [{ samplers: {}, channels: "not-an-array" }],
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://nested-containers.gltf",
+    env: {},
+  });
+  assert.equal(report.status, "error");
+  assert.deepEqual(
+    report.findings
+      .filter((finding) => finding.code === "ASSET_CONTAINER_INVALID")
+      .map((finding) => finding.location),
+    [
+      "/animations/0/channels",
+      "/animations/0/samplers",
+      "/meshes/0/primitives",
+      "/nodes/0/children",
+      "/scenes/0/nodes",
+      "/skins/0/joints",
+    ]
+  );
+});
+
 test("asset and dependency paths reject traversal segments even when normalization stays inside", async (t) => {
   const project = await createProject(t);
   await fs.mkdir(path.join(project, "sub"));
