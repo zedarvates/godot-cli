@@ -247,6 +247,36 @@ import/cache data; this command is not GPU, visual-quality, or OpenXR proof.
 `valid: false, complete: true` means the full proof ran and found a structural
 defect; `complete: false` means the validation evidence itself is incomplete.
 
+### Asset validation
+
+```bash
+uo-godot-cli asset validate res://assets/model.glb --project /path/to/game
+uo-godot-cli asset validate res://assets/model.gltf --project /path/to/game \
+  --policy res://asset-policy.json
+uo-godot-cli asset validate res://assets/model.gltf --project /path/to/game \
+  --godot-import --godot /path/to/Godot_v4.7-dev5_console
+```
+
+`asset validate` is a local, read-only validator for one regular project-local
+glTF 2.0 `.gltf` or `.glb`. It closes only declared local buffer/image
+dependencies, rejects URLs, data URIs, traversal and symlinks, fingerprints
+every accepted source, checks GLB framing and indexed references, and reports
+portable topology and bounded PNG/JPEG header metrics. It never scans the whole
+project.
+
+Performance limits are enforced only through a closed, versioned
+`uo-godot-asset-policy/1` JSON file; the CLI does not invent a headset budget.
+`--godot-import` copies the already validated closure to a disposable project,
+runs Godot headlessly with XR disabled and a reduced environment, then reports
+loaded node/mesh/material/animation/skeleton/body/collision counts. Collision
+node presence is not collision-quality proof. `not_requested` means the import
+layer did not run; a requested incomplete import returns exit code 1.
+
+Static or isolated import evidence is not GPU, VRAM, visual-quality,
+collision-quality, performance, or OpenXR proof. This command validates; it
+does not generate LODs, collisions, texture atlases, conversions, signatures,
+or mod packages.
+
 ### Project test profiles
 
 ```bash
@@ -402,6 +432,7 @@ Only loopback hosts are accepted. `localhost` is resolved and revalidated before
 
 | Gate | Result | Proof boundary |
 |---|---|---|
+| Asset validation + Godot 4.7-dev5 local gate, 2026-08-22 | **98 passed, 0 failed, 1 skipped** out of 99 | Static glTF/GLB, dependency, policy, package CLI, real disposable mesh import, collision-required rejection, and canonical source fingerprints. Fovea remained explicitly skipped; this is not GPU, VRAM, visual-quality, collision-quality, performance, or OpenXR proof. |
 | Default `npm test`, 2026-08-14 | **69 passed, 0 failed, 14 skipped** out of 83 | Build, Node protocol, compatibility catalog, installer, package consumer, project preflight, readiness, security invariants, managed-process controls, test-profile positives/negatives, and local scene-validation negatives. Real Godot and Fovea scenarios were explicitly skipped. |
 | Godot 4.7-dev5 local integration gate, 2026-08-14 | **82 passed, 0 failed, 1 skipped** out of 83 | Real headless Godot protocol, managed lifecycle, clean/structural/parse-error scene proofs, and a real `godot_script` test profile. Only the cross-repository FoveaEngine scenario was skipped. |
 | Fully configured local integration gate, 2026-08-14 | **83 passed, 0 failed, 0 skipped** with Godot 4.7-dev5 and the local FoveaEngine checkout | CLI/addon runtime, compatibility fail-closed controls, managed-process lifecycle, bounded test profiles, clean/error scene validation, and a temporary one-splat Fovea project; not GPU, visual-quality, production, or OpenXR proof. |

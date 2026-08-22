@@ -121,6 +121,30 @@ the managed-process security boundary.
 - The owned runtime is stopped on both success and failure. Identity uncertainty
   never escalates to an unverified or forced process kill.
 
+## Asset validation boundary
+
+`asset validate <res://asset>` is a local filesystem command and is not added
+to the live runtime addon's authenticated command catalog.
+
+- Only regular in-project glTF 2.0 `.gltf` and `.glb` roots are accepted.
+  Absolute paths, network/file/data URIs, protocol-relative paths, traversal,
+  malformed percent encoding, symlinks, and real paths outside the project are
+  rejected before dependency content is consumed.
+- The declared closure is limited to 256 files, 256 MiB per file, and 512 MiB
+  total. JSON depth, strings, arrays, visited values, findings, image-header
+  reads, child output, retained logs, and subprocess time are also bounded.
+- `uo-godot-asset-policy/1` rejects unknown fields and may tighten but never
+  raise built-in byte limits. There is no implicit VR performance policy.
+- `--godot-import` copies only the fingerprinted closure into an owned
+  disposable project. Godot runs directly without a shell, headlessly, with XR
+  disabled and without `GODOT_CLI_TOKEN`, mutation gates, or unsafe gates.
+- Import and probe output is bounded. Timeout, malformed/duplicate probe data,
+  nonzero exit, source fingerprint drift, or temporary-directory cleanup
+  failure makes the requested proof incomplete and fails closed.
+- Collision-node counts prove presence only. Static or isolated import evidence
+  does not prove collision quality, GPU/VRAM behavior, visual quality,
+  performance, foveation, stereo rendering, OpenXR, or production readiness.
+
 ## Installer boundary
 
 `uo-godot-cli addon status <project>` and `addon install <project>` operate on

@@ -3,6 +3,24 @@
 All notable changes to this fork are documented here. The project uses
 pre-release versions until the public API and operational boundary are stable.
 
+## Unreleased
+
+### Added
+
+- Bounded `asset validate` support for project-local glTF 2.0 `.gltf` and
+  `.glb` files, including local dependency closure, fingerprints, indexed
+  reference checks, portable metrics, PNG/JPEG header dimensions, and the
+  closed `uo-godot-asset-policy/1` schema.
+- Optional disposable Godot 4.7 import evidence with XR disabled, a scrubbed
+  child environment, bounded logs, source-integrity checks, collision-node
+  presence reporting, and fail-closed cleanup.
+
+### Known boundaries
+
+- Static and isolated-import evidence is not GPU, VRAM, visual-quality,
+  collision-quality, performance, or OpenXR proof. The command does not
+  generate LODs, collisions, atlases, conversions, signatures, or packages.
+
 ## 0.1.0-uo.7 — 2026-08-14
 
 ### Added
