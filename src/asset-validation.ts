@@ -3,6 +3,10 @@ import { createReadStream, promises as fs } from "node:fs";
 import * as path from "node:path";
 
 import { discoverProject } from "./project.js";
+import {
+  runIsolatedGodotImport,
+  type AssetImportReport,
+} from "./asset-import.js";
 
 export const MAX_ASSET_CLOSURE_FILES = 256;
 export const MAX_ASSET_FILE_BYTES = 256 * 1024 * 1024;
@@ -80,6 +84,10 @@ export interface AssetValidationReport {
     godotImport: {
       status: "ok" | "error" | "not_requested";
       complete: boolean;
+      summary?: AssetImportReport["summary"];
+      exitCodes?: AssetImportReport["exitCodes"];
+      logs?: AssetImportReport["logs"];
+      cleanup?: AssetImportReport["cleanup"];
     };
   };
   closure: {
@@ -1110,6 +1118,11 @@ export async function validateAsset(
   let metrics = emptyMetrics();
   let images: AssetImageMetadata[] = [];
   let policyReport: AssetValidationReport["policy"] = null;
+  let loadedPolicy: AssetPolicyV1 | null = null;
+  let godotImportProof: AssetValidationReport["proof"]["godotImport"] = {
+    status: "not_requested",
+    complete: false,
+  };
   let closure: InternalClosureFile[] = [
     { ...rootClosure, absolutePath: resolved.absolutePath },
   ];
@@ -1136,6 +1149,7 @@ export async function validateAsset(
     if (options.policy !== undefined) {
       try {
         const policy = await loadPolicy(discovery.projectRoot, options.policy);
+        loadedPolicy = policy;
         const passed = applyPolicy(
           policy,
           metrics,
@@ -1160,6 +1174,49 @@ export async function validateAsset(
     }
   } catch (error) {
     findings.push(findingFromError(error, resolved.format));
+  }
+
+  const staticValid = findings.every((finding) => finding.severity !== "error");
+  if (options.godotImport === true) {
+    if (findings.some((finding) => finding.severity === "error")) {
+      findings.push({
+        severity: "error",
+        code: "ASSET_IMPORT_FAILED",
+        location: resolved.resourcePath,
+        message: "Godot import was not run because static validation failed",
+      });
+      godotImportProof = { status: "error", complete: false, summary: null };
+    } else {
+      const imported = await runIsolatedGodotImport({
+        projectRoot: discovery.projectRoot,
+        asset: resolved.resourcePath,
+        closure: closure.map(({ absolutePath: _absolutePath, ...file }) => file),
+        godot: options.godot,
+        timeoutMs: options.timeoutMs ?? 30_000,
+        env,
+      });
+      findings.push(...imported.findings);
+      godotImportProof = {
+        status: imported.status,
+        complete: imported.complete,
+        summary: imported.summary,
+        exitCodes: imported.exitCodes,
+        logs: imported.logs,
+        cleanup: imported.cleanup,
+      };
+      if (
+        loadedPolicy?.require_collision_nodes === true &&
+        (imported.summary?.collisionShapes ?? 0) === 0
+      ) {
+        findings.push({
+          severity: "error",
+          code: "ASSET_COLLISION_REQUIRED",
+          location: "/policy/require_collision_nodes",
+          message: "Godot import observed no CollisionShape3D nodes",
+        });
+        if (policyReport !== null) policyReport.passed = false;
+      }
+    }
   }
 
   let unchanged = true;
@@ -1191,16 +1248,19 @@ export async function validateAsset(
   );
 
   const valid = findings.every((finding) => finding.severity !== "error");
+  const complete =
+    unchanged &&
+    (options.godotImport !== true || godotImportProof.complete);
   return {
-    status: valid ? "ok" : "error",
+    status: valid && complete ? "ok" : "error",
     valid,
-    complete: true,
+    complete,
     asset: resolved.resourcePath,
     projectRoot: discovery.projectRoot,
     format: resolved.format,
     proof: {
-      static: { status: valid ? "ok" : "error", complete: true },
-      godotImport: { status: "not_requested", complete: false },
+      static: { status: staticValid ? "ok" : "error", complete: true },
+      godotImport: godotImportProof,
     },
     closure: {
       fileCount: closure.length,
@@ -1215,9 +1275,15 @@ export async function validateAsset(
         reason: "LOD evidence requires a future versioned policy rule",
       },
       collision: {
-        status: "unknown",
-        collisionShapes: null,
-        reason: "Static glTF validation cannot prove Godot collision nodes",
+        status:
+          (godotImportProof.summary?.collisionShapes ?? 0) > 0
+            ? "observed"
+            : "unknown",
+        collisionShapes: godotImportProof.summary?.collisionShapes ?? null,
+        reason:
+          (godotImportProof.summary?.collisionShapes ?? 0) > 0
+            ? "Collision nodes were observed; collision quality is not proven"
+            : "Static glTF validation cannot prove Godot collision nodes",
       },
     },
     policy: policyReport,
