@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "external_dependency": {
+    "name": "GReFormer",
+    "required_path": "res://addons/greformer/",
+    "required": false
+  },
+  "requires_external_greformer": [
+    "greformer_create",
+    "greformer_push_pull",
+    "greformer_apply_hotspot",
+    "greformer_bake",
+    "greformer_export_obj",
+    "greformer_create_preset",
+    "greformer_snap_grid",
+    "greformer_carve_hole"
+  ],
+  "built_in": [
+    "greformer_generate_stairs",
+    "greformer_generate_terrain",
+    "greformer_generate_tunnel",
+    "greformer_generate_archway",
+    "greformer_generate_collision",
+    "greformer_array_duplicate",
+    "greformer_set_shading",
+    "greformer_paint_color"
+  ],
+  "explicitly_unsupported": [
+    "greformer_bevel"
+  ],
+  "policy": "Core godot-cli functionality must not require the external GReFormer addon. External commands are interoperability hooks only."
+}
