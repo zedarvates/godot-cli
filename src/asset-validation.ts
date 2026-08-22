@@ -13,6 +13,9 @@ export const MAX_ASSET_JSON_STRING_BYTES = 1024 * 1024;
 export const MAX_ASSET_JSON_ARRAY_ITEMS = 1_000_000;
 
 const MAX_ASSET_JSON_VALUES = 1_000_000;
+const GLB_MAGIC = 0x46546c67;
+const GLB_JSON_CHUNK = 0x4e4f534a;
+const GLB_BIN_CHUNK = 0x004e4942;
 const BOUNDARY =
   "Static or isolated import evidence is not GPU, VRAM, visual-quality, collision-quality, or OpenXR proof.";
 
@@ -113,6 +116,18 @@ interface ResolvedAsset {
 
 interface InternalClosureFile extends AssetClosureFile {
   absolutePath: string;
+}
+
+interface AssetPolicyV1 {
+  schema: "uo-godot-asset-policy/1";
+  max_total_bytes?: number;
+  max_meshes?: number;
+  max_primitives?: number;
+  max_materials?: number;
+  max_textures?: number;
+  max_image_dimension?: number;
+  require_godot_import?: boolean;
+  require_collision_nodes?: boolean;
 }
 
 class AssetValidationError extends Error {
@@ -284,6 +299,70 @@ function parseGltf(bytes: Buffer): Record<string, unknown> {
     throw new Error('Asset must declare glTF asset.version "2.0"');
   }
   return parsed;
+}
+
+function parseGlb(bytes: Buffer): Record<string, unknown> {
+  if (bytes.length < 20) throw new Error("GLB header or JSON chunk is truncated");
+  if (bytes.readUInt32LE(0) !== GLB_MAGIC) throw new Error("GLB magic is invalid");
+  if (bytes.readUInt32LE(4) !== 2) throw new Error("GLB version must be 2");
+  if (bytes.readUInt32LE(8) !== bytes.length) {
+    throw new Error("GLB declared length does not match the file length");
+  }
+  let offset = 12;
+  let json: Record<string, unknown> | null = null;
+  let binBytes: number | null = null;
+  while (offset < bytes.length) {
+    if (offset % 4 !== 0 || offset + 8 > bytes.length) {
+      throw new Error("GLB chunk framing or alignment is invalid");
+    }
+    const length = bytes.readUInt32LE(offset);
+    const type = bytes.readUInt32LE(offset + 4);
+    const start = offset + 8;
+    const end = start + length;
+    if (length % 4 !== 0 || end > bytes.length) {
+      throw new Error("GLB chunk length is invalid");
+    }
+    if (type === GLB_JSON_CHUNK) {
+      if (json !== null || offset !== 12) {
+        throw new Error("GLB must contain exactly one leading JSON chunk");
+      }
+      json = parseGltf(bytes.subarray(start, end));
+    } else if (type === GLB_BIN_CHUNK) {
+      if (json === null || binBytes !== null) {
+        throw new Error("GLB BIN chunk is duplicate or precedes JSON");
+      }
+      binBytes = length;
+    } else {
+      throw new Error(`GLB contains unsupported chunk type 0x${type.toString(16)}`);
+    }
+    offset = end;
+  }
+  if (offset !== bytes.length || json === null) {
+    throw new Error("GLB is missing a complete JSON chunk");
+  }
+  if (Array.isArray(json.buffers)) {
+    const internal = json.buffers.filter(
+      (buffer) => isRecord(buffer) && buffer.uri === undefined
+    );
+    if (internal.length > 1) throw new Error("GLB declares multiple internal buffers");
+    if (internal.length === 1) {
+      const declared = internal[0].byteLength;
+      if (
+        typeof declared !== "number" ||
+        !Number.isSafeInteger(declared) ||
+        declared < 0 ||
+        binBytes === null ||
+        declared > binBytes
+      ) {
+        throw new Error("GLB internal buffer does not match its BIN chunk");
+      }
+    } else if (binBytes !== null) {
+      throw new Error("GLB BIN chunk has no matching internal buffer");
+    }
+  } else if (binBytes !== null) {
+    throw new Error("GLB BIN chunk has no buffers declaration");
+  }
+  return json;
 }
 
 function collectMetrics(gltf: Record<string, unknown>): AssetMetrics {
@@ -859,10 +938,153 @@ async function collectImageMetadata(
   return result;
 }
 
-function findingFromError(error: unknown): AssetFinding {
+async function loadPolicy(
+  projectRoot: string,
+  resourcePath: string
+): Promise<AssetPolicyV1> {
+  if (!resourcePath.startsWith("res://") || !resourcePath.endsWith(".json")) {
+    throw new Error("Asset policy requires a project-local res:// .json path");
+  }
+  const candidate = path.resolve(
+    projectRoot,
+    resourcePath.slice("res://".length).replaceAll("/", path.sep)
+  );
+  const within = path.relative(projectRoot, candidate);
+  if (
+    within === ".." ||
+    within.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(within)
+  ) {
+    throw new Error("Asset policy path must stay inside the Godot project");
+  }
+  const stat = await fs.lstat(candidate);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error("Asset policy must be a regular project file");
+  }
+  if (stat.size > MAX_ASSET_JSON_STRING_BYTES) {
+    throw new Error("Asset policy exceeds the 1 MiB limit");
+  }
+  const canonicalProject = await fs.realpath(projectRoot);
+  const canonical = await fs.realpath(candidate);
+  const canonicalWithin = path.relative(canonicalProject, canonical);
+  if (
+    canonicalWithin === ".." ||
+    canonicalWithin.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(canonicalWithin)
+  ) {
+    throw new Error("Asset policy resolves outside the Godot project");
+  }
+  const parsed: unknown = JSON.parse(await fs.readFile(canonical, "utf8"));
+  if (!isRecord(parsed) || parsed.schema !== "uo-godot-asset-policy/1") {
+    throw new Error("Asset policy schema must be uo-godot-asset-policy/1");
+  }
+  const allowed = new Set([
+    "schema",
+    "max_total_bytes",
+    "max_meshes",
+    "max_primitives",
+    "max_materials",
+    "max_textures",
+    "max_image_dimension",
+    "require_godot_import",
+    "require_collision_nodes",
+  ]);
+  for (const key of Object.keys(parsed)) {
+    if (!allowed.has(key)) throw new Error(`Asset policy contains unknown field: ${key}`);
+  }
+  const numericKeys = [
+    "max_total_bytes",
+    "max_meshes",
+    "max_primitives",
+    "max_materials",
+    "max_textures",
+    "max_image_dimension",
+  ] as const;
+  for (const key of numericKeys) {
+    const value = parsed[key];
+    if (
+      value !== undefined &&
+      (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    ) {
+      throw new Error(`Asset policy ${key} must be a non-negative safe integer`);
+    }
+  }
+  if (
+    parsed.max_total_bytes !== undefined &&
+    typeof parsed.max_total_bytes === "number" &&
+    parsed.max_total_bytes > MAX_ASSET_TOTAL_BYTES
+  ) {
+    throw new Error("Asset policy max_total_bytes cannot raise the built-in limit");
+  }
+  for (const key of ["require_godot_import", "require_collision_nodes"] as const) {
+    if (parsed[key] !== undefined && typeof parsed[key] !== "boolean") {
+      throw new Error(`Asset policy ${key} must be boolean`);
+    }
+  }
+  if (parsed.require_collision_nodes === true && parsed.require_godot_import !== true) {
+    throw new Error("Asset policy collision evidence requires Godot import");
+  }
+  return parsed as unknown as AssetPolicyV1;
+}
+
+function applyPolicy(
+  policy: AssetPolicyV1,
+  metrics: AssetMetrics,
+  images: AssetImageMetadata[],
+  totalBytes: number,
+  requestedImport: boolean,
+  findings: AssetFinding[]
+): boolean {
+  const checks: Array<[keyof AssetPolicyV1, number]> = [
+    ["max_total_bytes", totalBytes],
+    ["max_meshes", metrics.meshes],
+    ["max_primitives", metrics.primitives],
+    ["max_materials", metrics.materials],
+    ["max_textures", metrics.textures],
+  ];
+  for (const [key, actual] of checks) {
+    const limit = policy[key];
+    if (typeof limit === "number" && actual > limit) {
+      findings.push({
+        severity: "error",
+        code: "ASSET_POLICY_LIMIT",
+        location: `/policy/${key}`,
+        message: `${key} limit ${limit} was exceeded by measured value ${actual}`,
+      });
+    }
+  }
+  if (typeof policy.max_image_dimension === "number") {
+    for (const [index, image] of images.entries()) {
+      if (
+        (image.width !== null && image.width > policy.max_image_dimension) ||
+        (image.height !== null && image.height > policy.max_image_dimension)
+      ) {
+        findings.push({
+          severity: "error",
+          code: "ASSET_POLICY_LIMIT",
+          location: `/images/${index}`,
+          message: `Image dimension exceeds policy limit ${policy.max_image_dimension}`,
+        });
+      }
+    }
+  }
+  if (policy.require_godot_import === true && !requestedImport) {
+    findings.push({
+      severity: "error",
+      code: "ASSET_POLICY_REQUIRES_IMPORT",
+      location: "/policy/require_godot_import",
+      message: "Asset policy requires an explicitly requested Godot import proof",
+    });
+  }
+  return !findings.some(
+    (finding) => finding.severity === "error" && finding.code.startsWith("ASSET_POLICY")
+  );
+}
+
+function findingFromError(error: unknown, format: "gltf" | "glb"): AssetFinding {
   return {
     severity: "error",
-    code: "ASSET_GLTF_INVALID",
+    code: format === "glb" ? "ASSET_GLB_INVALID" : "ASSET_GLTF_INVALID",
     location: "/",
     message: error instanceof Error ? error.message : String(error),
   };
@@ -887,16 +1109,14 @@ export async function validateAsset(
   const findings: AssetFinding[] = [];
   let metrics = emptyMetrics();
   let images: AssetImageMetadata[] = [];
+  let policyReport: AssetValidationReport["policy"] = null;
   let closure: InternalClosureFile[] = [
     { ...rootClosure, absolutePath: resolved.absolutePath },
   ];
 
   try {
     const bytes = await fs.readFile(resolved.absolutePath);
-    if (resolved.format === "glb") {
-      throw new Error("GLB validation is not available in this proof layer");
-    }
-    const gltf = parseGltf(bytes);
+    const gltf = resolved.format === "glb" ? parseGlb(bytes) : parseGltf(bytes);
     metrics = collectMetrics(gltf);
     validateReferences(gltf, findings);
     closure = await collectClosure(
@@ -913,8 +1133,33 @@ export async function validateAsset(
       closure,
       findings
     );
+    if (options.policy !== undefined) {
+      try {
+        const policy = await loadPolicy(discovery.projectRoot, options.policy);
+        const passed = applyPolicy(
+          policy,
+          metrics,
+          images,
+          closure.reduce((sum, file) => sum + file.bytes, 0),
+          options.godotImport === true,
+          findings
+        );
+        policyReport = {
+          resourcePath: options.policy,
+          schema: "uo-godot-asset-policy/1",
+          passed,
+        };
+      } catch (error) {
+        findings.push({
+          severity: "error",
+          code: "ASSET_POLICY_INVALID",
+          location: options.policy,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   } catch (error) {
-    findings.push(findingFromError(error));
+    findings.push(findingFromError(error, resolved.format));
   }
 
   let unchanged = true;
@@ -975,7 +1220,7 @@ export async function validateAsset(
         reason: "Static glTF validation cannot prove Godot collision nodes",
       },
     },
-    policy: null,
+    policy: policyReport,
     findings: findings.slice(0, MAX_ASSET_FINDINGS),
     integrity: { unchanged },
     boundaries: [BOUNDARY],

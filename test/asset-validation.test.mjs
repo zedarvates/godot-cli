@@ -20,6 +20,21 @@ async function createProject(context) {
   return root;
 }
 
+function buildGlb(document) {
+  const json = Buffer.from(JSON.stringify(document), "utf8");
+  const paddedLength = Math.ceil(json.length / 4) * 4;
+  const chunk = Buffer.alloc(paddedLength, 0x20);
+  json.copy(chunk);
+  const glb = Buffer.alloc(12 + 8 + chunk.length);
+  glb.writeUInt32LE(0x46546c67, 0);
+  glb.writeUInt32LE(2, 4);
+  glb.writeUInt32LE(glb.length, 8);
+  glb.writeUInt32LE(chunk.length, 12);
+  glb.writeUInt32LE(0x4e4f534a, 16);
+  chunk.copy(glb, 20);
+  return glb;
+}
+
 test("static validation accepts a minimal project-local glTF 2.0 asset", async (t) => {
   const project = await createProject(t);
   await fs.writeFile(
@@ -353,4 +368,116 @@ test("static validation derives triangle-list metrics from accessor counts", asy
   assert.equal(report.status, "ok");
   assert.deepEqual(report.metrics.primitiveModes, { "4": 1 });
   assert.deepEqual(report.metrics.triangles, { value: 2, reason: null });
+});
+
+test("static validation accepts a strictly framed GLB 2.0 JSON chunk", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "model.glb"),
+    buildGlb({ asset: { version: "2.0" }, scenes: [{}] })
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://model.glb",
+    env: {},
+  });
+
+  assert.equal(report.status, "ok");
+  assert.equal(report.format, "glb");
+  assert.equal(report.metrics.scenes, 1);
+  assert.equal(report.closure.fileCount, 1);
+  assert.equal(report.integrity.unchanged, true);
+});
+
+test("versioned asset policy enforces measured limits without default VR claims", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "model.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      meshes: [{ primitives: [] }],
+    }),
+    "utf8"
+  );
+  await fs.writeFile(
+    path.join(project, "asset-policy.json"),
+    JSON.stringify({
+      schema: "uo-godot-asset-policy/1",
+      max_meshes: 0,
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://model.gltf",
+    policy: "res://asset-policy.json",
+    env: {},
+  });
+
+  assert.equal(report.status, "error");
+  assert.deepEqual(report.policy, {
+    resourcePath: "res://asset-policy.json",
+    schema: "uo-godot-asset-policy/1",
+    passed: false,
+  });
+  assert.ok(
+    report.findings.some((finding) => finding.code === "ASSET_POLICY_LIMIT")
+  );
+});
+
+test("GLB validation rejects ambiguous framing with a stable error code", async (t) => {
+  const project = await createProject(t);
+  const wrongMagic = buildGlb({ asset: { version: "2.0" } });
+  wrongMagic.writeUInt32LE(0, 0);
+  const wrongLength = buildGlb({ asset: { version: "2.0" } });
+  wrongLength.writeUInt32LE(wrongLength.length + 4, 8);
+  const unknownChunk = buildGlb({ asset: { version: "2.0" } });
+  unknownChunk.writeUInt32LE(0x12345678, 16);
+
+  for (const [name, bytes] of [
+    ["wrong-magic.glb", wrongMagic],
+    ["wrong-length.glb", wrongLength],
+    ["unknown-chunk.glb", unknownChunk],
+  ]) {
+    await fs.writeFile(path.join(project, name), bytes);
+    const report = await validateAsset({ project, asset: `res://${name}`, env: {} });
+    assert.equal(report.status, "error", name);
+    assert.equal(report.findings[0].code, "ASSET_GLB_INVALID", name);
+    assert.equal(report.integrity.unchanged, true, name);
+  }
+});
+
+test("asset policy rejects unknown fields and inconsistent collision requirements", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "model.gltf"),
+    JSON.stringify({ asset: { version: "2.0" } }),
+    "utf8"
+  );
+  const policies = [
+    { schema: "uo-godot-asset-policy/1", surprise: true },
+    {
+      schema: "uo-godot-asset-policy/1",
+      require_collision_nodes: true,
+      require_godot_import: false,
+    },
+  ];
+
+  for (const [index, policy] of policies.entries()) {
+    const name = `invalid-policy-${index}.json`;
+    await fs.writeFile(path.join(project, name), JSON.stringify(policy), "utf8");
+    const report = await validateAsset({
+      project,
+      asset: "res://model.gltf",
+      policy: `res://${name}`,
+      env: {},
+    });
+    assert.equal(report.status, "error", name);
+    assert.ok(
+      report.findings.some((finding) => finding.code === "ASSET_POLICY_INVALID"),
+      name
+    );
+  }
 });
