@@ -7,7 +7,7 @@ extends Node
 const DEFAULT_PORT := 9900
 const BIND_ADDRESS := "127.0.0.1"
 const PROTOCOL_VERSION := 1
-const ADDON_VERSION := "0.1.0-uo.6"
+const ADDON_VERSION := "0.4.0"
 const MIN_TOKEN_LENGTH := 32
 const MAX_MESSAGE_BYTES := 1024 * 1024
 const MAX_RESPONSE_BYTES := 16 * 1024 * 1024

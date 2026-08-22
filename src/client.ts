@@ -11,13 +11,20 @@ export interface GodotResponse {
 export class GodotClient {
   private host: string;
   private port: number;
+  private token: string;
 
-  constructor(options: { host?: string; port?: string | number }) {
+  constructor(options: {
+    host?: string;
+    port?: string | number;
+    /** Overrides GODOT_CLI_TOKEN. Lets a caller drive more than one engine. */
+    token?: string;
+  }) {
     this.host = options.host || "localhost";
     this.port =
       typeof options.port === "string"
         ? parseInt(options.port, 10)
         : options.port || 9900;
+    this.token = (options.token ?? process.env.GODOT_CLI_TOKEN ?? "").trim();
   }
 
   async send(
@@ -36,12 +43,11 @@ export class GodotClient {
       }, timeoutMs);
 
       socket.connect(this.port, this.host, () => {
-        // PATCH 01: the hardened addon (cli_server.gd:_handle_message) rejects any
-        // request without a matching `token`. Ported from the `codex/uo7-hardened-release`
-        // branch's client.ts, which already does this.
-        const token = (process.env.GODOT_CLI_TOKEN ?? "").trim();
+        // The hardened addon (cli_server.gd:_handle_message) rejects any request
+        // without a matching `token`, and disconnects. The uo7 client already does
+        // this; this branch shipped the hardened server with the older client.
         const message =
-          JSON.stringify({ id, token, command, params }) + "\n";
+          JSON.stringify({ id, token: this.token, command, params }) + "\n";
         socket.write(message);
       });
 

@@ -14,7 +14,7 @@ program
   .description(
     "CLI tool for controlling the Godot game engine — like Playwright, but for games"
   )
-  .version("0.2.0")
+  .version("0.4.0")
   .option("--host <host>", "Godot server host", "localhost")
   .option("--port <port>", "Godot server port", "9900")
   .option("--mcp", "Run as Stdio MCP (Model Context Protocol) Server for AI Agents");
@@ -1256,9 +1256,17 @@ program
           mcpConfig = { mcpServers: {} };
         }
       }
+      // Point at this installation's own built server. The previous value,
+      // `npx -y godot-cli-mcp`, names a package that has never been published, so
+      // every generated config failed to start.
+      const serverEntry = path.resolve(
+        path.dirname(new URL(import.meta.url).pathname),
+        "mcp-cli.js"
+      );
       mcpConfig.mcpServers["godot-cli"] = {
-        command: "npx",
-        args: ["-y", "godot-cli-mcp"],
+        command: process.execPath,
+        args: [serverEntry],
+        env: { GODOT_CLI_TOKEN: "${GODOT_CLI_TOKEN}" },
       };
       fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2) + "\n");
       process.stdout.write(JSON.stringify({
@@ -1307,16 +1315,56 @@ program
       }
 
       let projContent = fs.readFileSync(projFile, "utf-8");
-      const pluginEntry = "res://addons/godot_cli/plugin.cfg";
-      if (!projContent.includes(pluginEntry)) {
-        if (projContent.includes("[editor_plugins]")) {
+      let projChanged = false;
+
+      // project.godot is line-oriented and may contain ';' comments, so match section
+      // headers anchored to the start of a line rather than by substring. A naive
+      // indexOf/replace corrupts any file whose comments mention a section name.
+      const stripComments = (text: string): string =>
+        text
+          .split("\n")
+          .filter((line) => !line.trimStart().startsWith(";"))
+          .join("\n");
+
+      const hasSection = (section: string): boolean =>
+        new RegExp(`^\\[${section}\\]\\s*$`, "m").test(stripComments(projContent));
+
+      const hasValue = (needle: string): boolean =>
+        stripComments(projContent).includes(needle);
+
+      /** Adds `entry` under `[section]`, creating the section if it is absent. */
+      const upsert = (section: string, entry: string): void => {
+        if (hasSection(section)) {
           projContent = projContent.replace(
-            "[editor_plugins]",
-            `[editor_plugins]\n\nenabled=PackedStringArray("${pluginEntry}")`
+            new RegExp(`^\\[${section}\\]\\s*$`, "m"),
+            `[${section}]\n\n${entry}`
           );
         } else {
-          projContent += `\n[editor_plugins]\n\nenabled=PackedStringArray("${pluginEntry}")\n`;
+          projContent += `\n[${section}]\n\n${entry}\n`;
         }
+        projChanged = true;
+      };
+
+      const pluginEntry = "res://addons/godot_cli/plugin.cfg";
+      if (!hasValue(pluginEntry)) {
+        upsert("editor_plugins", `enabled=PackedStringArray("${pluginEntry}")`);
+      }
+
+      // plugin.gd registers the autoload on _enter_tree and removes it again on
+      // _exit_tree, so it never survives an editor session. Without an [autoload]
+      // entry in project.godot, `godot --path <project>` starts a game with no TCP
+      // server at all -- which is the launch mode this CLI is built around.
+      if (!hasValue("res://addons/godot_cli/cli_server.gd")) {
+        upsert("autoload", 'GodotCLI="*res://addons/godot_cli/cli_server.gd"');
+      }
+
+      // get-logs can only surface engine-level errors and warnings when Godot is
+      // writing them to a log file; GDScript has no hook for them otherwise.
+      if (!hasValue("file_logging/enable_file_logging")) {
+        upsert("debug", "file_logging/enable_file_logging=true");
+      }
+
+      if (projChanged) {
         fs.writeFileSync(projFile, projContent);
       }
 

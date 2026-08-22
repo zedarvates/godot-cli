@@ -550,7 +550,7 @@ export async function runMcpServer(options: { host?: string; port?: string | num
         sendResponse(id, {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "godot-cli-mcp", version: "0.3.0" },
+          serverInfo: { name: "godot-cli-mcp", version: "0.4.0" },
         });
       } else if (method === "tools/list") {
         sendResponse(id, { tools });
