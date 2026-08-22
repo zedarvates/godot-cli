@@ -2,9 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [ main, feature/* ]
+    branches: [ main, 'feature/**', 'fix/**' ]
+  # Deliberately unfiltered. Work reaches this repo through the long-lived
+  # feature/* branches, so `branches: [ main ]` meant a pull request into one of
+  # them ran no checks at all.
   pull_request:
-    branches: [ main ]
 
 jobs:
   build-and-test:

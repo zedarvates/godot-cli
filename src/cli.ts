@@ -1233,6 +1233,20 @@ program
   });
 
 program
+  .command("commands")
+  .description("List every command the server accepts and the env gate each one requires")
+  .action(async () => {
+    await run("commands", {});
+  });
+
+program
+  .command("server-info")
+  .description("Report protocol version, which env gates are open, and the server's size/count limits")
+  .action(async () => {
+    await run("server_info", {});
+  });
+
+program
   .command("inspect-children")
   .description("Inspect direct or nested child nodes under a target path")
   .argument("[node-path]", "Path to node", "")

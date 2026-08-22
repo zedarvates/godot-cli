@@ -2,7 +2,7 @@ extends Node
 ## GodotCLI Server
 ## TCP server that accepts newline-delimited JSON commands for controlling the running game.
 ## Protocol: Each message is a JSON object followed by \n.
-## Target: Godot 4.7.x
+## Target: Godot 4.6.x
 
 const DEFAULT_PORT := 9900
 const BIND_ADDRESS := "127.0.0.1"

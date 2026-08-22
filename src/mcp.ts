@@ -522,6 +522,18 @@ export async function runMcpServer(options: { host?: string; port?: string | num
       inputSchema: { type: "object", properties: {} },
     },
     {
+      name: "godot_commands",
+      description:
+        "List every command the server accepts and the environment gate each one requires. Use this to discover capability before planning a sequence of calls.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "godot_server_info",
+      description:
+        "Report the protocol version, which environment gates are currently open, and the server's size and count limits.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
       name: "godot_inspect_node_children",
       description: "Inspect direct or nested child nodes under a target path.",
       inputSchema: {
@@ -613,6 +625,8 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_record_metrics": commandName = "record_metrics"; break;
           case "godot_version": commandName = "version"; break;
           case "godot_clear_logs": commandName = "clear_logs"; break;
+          case "godot_commands": commandName = "commands"; break;
+          case "godot_server_info": commandName = "server_info"; break;
           case "godot_inspect_node_children": commandName = "inspect_children"; break;
           default:
             sendError(id, -32601, `Unknown tool: ${toolName}`);

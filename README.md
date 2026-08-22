@@ -27,33 +27,65 @@ Two components:
 
 ## Setup
 
-### 1. Install the CLI
+### 1. Build the CLI
+
+This package is **not** published to npm. The name `godot-cli` on the public registry
+belongs to an unrelated project, so `npm install -g godot-cli` installs someone else's
+tool. Build from this checkout instead:
 
 ```bash
-npm install -g godot-cli
-# or use locally
 npm install
 npm run build
 ```
 
-### 2. Add the Godot addon
-
-Copy the `godot-addon/addons/godot_cli/` folder into your Godot project's `addons/` directory:
+The examples below write `godot-cli`; point that at your build:
 
 ```bash
-cp -r godot-addon/addons/godot_cli /path/to/your/godot-project/addons/
+alias godot-cli='node "$PWD/dist/src/cli.js"'
 ```
 
-### 3. Enable the plugin
+### 2. Install the addon into your project
 
-In Godot: **Project → Project Settings → Plugins** → Enable **GodotCLI**
+```bash
+godot-cli install-addon /path/to/your/godot-project
+```
+
+This copies `godot-addon/addons/godot_cli/` into the project and writes the three
+`project.godot` entries the server needs:
+
+- the plugin under `[editor_plugins]`,
+- the `GodotCLI` **autoload** — without it the running game has no TCP server at all,
+  because `plugin.gd` registers the autoload on `_enter_tree` and removes it again on
+  `_exit_tree`,
+- `debug/file_logging/enable_file_logging`, which is where `get-logs` reads
+  engine-level errors and warnings from.
+
+### 3. Set the auth token
+
+The server refuses to start without `GODOT_CLI_TOKEN`, and the CLI must present the same
+value. It has to be at least 32 characters:
+
+```bash
+export GODOT_CLI_TOKEN=$(openssl rand -hex 32)
+```
+
+Most commands need a gate opened as well — see
+[Authentication and gates](#authentication-and-gates).
 
 ### 4. Run your game
 
-The TCP server starts automatically when the game runs. You'll see:
+```bash
+godot --path /path/to/your/godot-project
+```
+
+With the autoload installed and the token set, you will see:
+
 ```
 GodotCLI: Server listening on port 9900
 ```
+
+If you do not, check the engine output: the server reports why it refused to start and
+disables itself, rather than failing at connect time.
 
 ## Commands
 
@@ -164,6 +196,10 @@ godot-cli metrics
 
 # Highlight a node in the viewport for visual screenshots
 godot-cli highlight-node /root/Main/Player --duration 3.0
+
+# Capability discovery: what this server accepts, and under which gate
+godot-cli commands
+godot-cli server-info
 ```
 
 ### Input simulation
@@ -300,6 +336,31 @@ godot-cli viewport-info
 
 ## Configuration
 
+### Authentication and gates
+
+Four environment variables are read by the addon when the game starts. They must be set
+in the environment Godot itself is launched from, not the CLI's.
+
+| variable | required | effect |
+|---|---|---|
+| `GODOT_CLI_TOKEN` | **yes** | Shared secret, minimum 32 characters. The server exits during `_ready()` without it, and rejects any client that presents a different value. The CLI reads the same variable. |
+| `GODOT_CLI_ALLOW_MUTATIONS` | no | Opens the commands that change the running game — `set-property`, `add-node`, `call-method`, the input and greformer commands. Refused by default. |
+| `GODOT_CLI_ALLOW_UNSAFE` | no | Opens `eval` and the commands that write files. Refused by default. |
+| `GODOT_CLI_PORT` | no | Listen port, default `9900`. Equivalent to `--godot-cli-port=`. |
+
+The two gate variables accept `1`, `true`, `yes` or `on`.
+
+Every command is catalogued as read-only, mutating or unsafe, and anything not in the
+catalogue is refused. Ask the running server what it will accept:
+
+```bash
+godot-cli commands      # every command and the gate it requires
+godot-cli server-info   # protocol version, which gates are open, size limits
+```
+
+The server also refuses to start unless `OS.is_debug_build()` is true, so it is inert in
+an exported release build.
+
 **Port**: Default is `9900`. Override via command line when launching Godot:
 
 ```bash
@@ -322,7 +383,7 @@ When setting properties, you can use:
 
 ## Target
 
-- **Godot 4.6+** (tested with 4.6.1)
+- **Godot 4.6** (verified against 4.6.stable, build `89cea1439`)
 - **Node.js 18+**
 
 ## License

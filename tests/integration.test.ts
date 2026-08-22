@@ -157,6 +157,29 @@ test(
       assert.equal((found.data as any).count, 1);
     });
 
+    await t.test("the command catalogue describes the server's own gates", async () => {
+      // `commands` and `server_info` had server handlers but were reachable from
+      // neither the CLI nor MCP, so an agent had no way to discover capability.
+      const cat = await client.send("commands");
+      assert.equal(cat.status, "ok");
+      const entries = (cat.data as any).commands as Array<Record<string, any>>;
+      const byName = new Map(entries.map((e) => [e.name, e]));
+
+      // Nothing may be absent from the catalogue: an uncatalogued command used to
+      // fall through _command_denial() and bypass the gates entirely.
+      for (const command of ["ping", "eval", "undo", "greformer_export_gltf"]) {
+        assert.ok(byName.has(command), `${command} missing from the catalogue`);
+      }
+      assert.equal(byName.get("ping")!.security, "read_only");
+      assert.equal(byName.get("eval")!.required_gate, "GODOT_CLI_ALLOW_UNSAFE");
+      // Writes files, so it belongs behind the unsafe gate rather than nothing.
+      assert.equal(byName.get("greformer_export_gltf")!.security, "unsafe");
+
+      const info = await client.send("server_info");
+      assert.equal(info.status, "ok");
+      assert.equal((info.data as any).protocol_version, 1);
+    });
+
     await t.test("batch execution gates each subcommand individually", async () => {
       const res = await client.send("batch_execute", {
         commands: [{ command: "ping" }, { command: "definitely_not_a_command" }],
