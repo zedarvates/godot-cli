@@ -725,6 +725,18 @@ program
   });
 
 program
+  .command("highlight-node")
+  .description("Temporarily highlight a node in the viewport for visual inspection")
+  .argument("<node-path>", "Path to node")
+  .option("--duration <seconds>", "Highlight duration in seconds", "2.0")
+  .action(async (nodePath: string, opts: { duration: string }) => {
+    await run("highlight_node", {
+      path: nodePath,
+      duration: parseFloat(opts.duration),
+    });
+  });
+
+program
   .command("find-nodes")
   .description("Find nodes matching wildcard pattern, class type, or node group")
   .option("--pattern <pattern>", "Name pattern (e.g. *Player* or Enemy*)")
@@ -1061,11 +1073,11 @@ program
   .action(async (opts) => {
     await run("greformer_generate_stairs", {
       parent: opts.parent,
-      step_count: parseInt(opts.steps),
-      step_width: parseFloat(opts.width),
-      step_height: parseFloat(opts.height),
-      step_depth: parseFloat(opts.depth),
-      has_railings: opts.railings === "true",
+      steps: parseInt(opts.steps),
+      width: parseFloat(opts.width),
+      height: parseFloat(opts.height),
+      depth: parseFloat(opts.depth),
+      railings: opts.railings === "true",
     });
   });
 

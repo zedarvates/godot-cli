@@ -23,6 +23,11 @@ const MAX_SCENE_TREE_DEPTH := 64
 const MAX_SCENE_NODES := 4096
 const MAX_VISIBLE_NODES := 4096
 const MAX_ASSERT_CHECKS := 256
+const MAX_CAPTURE_FRAMES := 30
+const MAX_BATCH_COMMANDS := 64
+const MAX_FIND_RESULTS := 1024
+const MAX_LOG_RETURNED := 512
+const MAX_HIGHLIGHT_SECONDS := 60.0
 
 const READ_ONLY_COMMANDS := {
 	"ping": true,
@@ -41,6 +46,21 @@ const READ_ONLY_COMMANDS := {
 	"viewport_info": true,
 	"visible_nodes": true,
 	"inspect_level_layout": true,
+	"metrics": true,
+	"get_logs": true,
+	"find_nodes": true,
+	"list_signals": true,
+	"query_ray": true,
+	"query_point": true,
+	"capture_sequence": true,
+	"export_project_api": true,
+	"batch_execute": true,
+	"fuzzy_find_node": true,
+	"inspect_children": true,
+	"inspect_resources": true,
+	"profile_performance": true,
+	"record_metrics": true,
+	"version": true,
 }
 
 const MUTATING_COMMANDS := {
@@ -64,6 +84,22 @@ const MUTATING_COMMANDS := {
 	"greformer_create_preset": true,
 	"greformer_snap_grid": true,
 	"greformer_carve_hole": true,
+	"emit_signal": true,
+	"action_press": true,
+	"action_release": true,
+	"highlight_node": true,
+	"clear_logs": true,
+	"undo": true,
+	"redo": true,
+	"greformer_set_shading": true,
+	"greformer_paint_color": true,
+	"greformer_bevel_edges": true,
+	"greformer_generate_stairs": true,
+	"greformer_generate_terrain": true,
+	"greformer_generate_tunnel": true,
+	"greformer_generate_archway": true,
+	"greformer_generate_collision": true,
+	"greformer_array_duplicate": true,
 }
 
 const UNSAFE_COMMANDS := {
@@ -74,6 +110,7 @@ const UNSAFE_COMMANDS := {
 	"attach_script": true,
 	"detach_script": true,
 	"save_scene": true,
+	"greformer_export_gltf": true,
 }
 
 var _auth_token := ""
@@ -85,6 +122,8 @@ var _server: TCPServer = null
 var _clients: Array[Dictionary] = []
 var _pending_waits: Array[Dictionary] = []
 var _log_buffer: Array[Dictionary] = []
+var _pending_frames: Array[Dictionary] = []
+var _pending_physics: Array[Dictionary] = []
 
 # --- Lifecycle ---
 
@@ -136,6 +175,21 @@ func _ready() -> void:
 func _env_flag_enabled(name: String) -> bool:
 	var value := OS.get_environment(name).strip_edges().to_lower()
 	return value == "1" or value == "true" or value == "yes" or value == "on"
+
+
+func _physics_process(_delta: float) -> void:
+	if _pending_physics.is_empty():
+		return
+	var queued := _pending_physics.duplicate()
+	_pending_physics.clear()
+	for job in queued:
+		var result: Dictionary = {}
+		if job["kind"] == "ray":
+			result = _run_ray_query(job["params"])
+		else:
+			result = _run_point_query(job["params"])
+		result["id"] = job["id"]
+		_send(job["client"], result)
 
 
 func _process(_delta: float) -> void:
@@ -201,6 +255,7 @@ func _process(_delta: float) -> void:
 
 	# Check pending wait-for conditions
 	_check_pending_waits()
+	_check_pending_frames()
 
 # --- Protocol ---
 
@@ -405,6 +460,26 @@ func _execute(command: String, params: Dictionary, client: Dictionary = {}, id: 
 		"wait_for":
 			_cmd_wait_for(params, client, id)
 			return null  # Response is deferred
+		"metrics": return _cmd_metrics(params)
+		"get_logs": return _cmd_get_logs(params)
+		"find_nodes": return _cmd_find_nodes(params)
+		"list_signals": return _cmd_list_signals(params)
+		"emit_signal": return _cmd_emit_signal(params)
+		"action_press": return _cmd_action_press(params)
+		"action_release": return _cmd_action_release(params)
+		"batch_execute": return _cmd_batch_execute(params)
+		"query_ray":
+			_queue_physics_query("ray", params, client, id)
+			return null  # Response is deferred to _physics_process
+		"query_point":
+			_queue_physics_query("point", params, client, id)
+			return null  # Response is deferred to _physics_process
+		"capture_sequence":
+			_cmd_capture_sequence(params, client, id)
+			return null  # Response is deferred until all frames are captured
+		"highlight_node":
+			_cmd_highlight_node(params, client, id)
+			return null  # Response is deferred until the highlight expires
 		"assert": return _cmd_assert(params)
 		"validate_scene": return _cmd_validate_scene(params)
 		"viewport_info": return _cmd_viewport_info(params)
@@ -451,7 +526,10 @@ func _command_denial(command: String, params: Dictionary) -> String:
 		if not _allow_unsafe:
 			return "Unsafe commands are disabled; set GODOT_CLI_ALLOW_UNSAFE=1 before launching Godot"
 		return ""
-	return ""
+	# Default-deny: a command absent from all three catalogs is refused rather than
+	# silently allowed. Previously this returned "" (allow), so any command not listed
+	# bypassed the gate system entirely -- including scene-mutating and file-writing ones.
+	return "Command is not present in the security catalog and is refused by default"
 
 
 func _params_require_unsafe(command: String, params: Dictionary) -> bool:
@@ -2168,24 +2246,19 @@ func _cmd_greformer_carve_hole(params: Dictionary) -> Variant:
 func _parse_vector3(val: Variant) -> Vector3:
 	if val is Vector3:
 		return val
-	if val is Dictionary:
-		var d := val as Dictionary
-		return Vector3(float(d.get("x", 0)), float(d.get("y", 0)), float(d.get("z", 0)))
 	if val is Array and (val as Array).size() >= 3:
 		var a := val as Array
 		return Vector3(float(a[0]), float(a[1]), float(a[2]))
+	# _deserialize already understands both the {"_type": "Vector3", ...} envelope and
+	# the documented "Vector3(x, y, z)" constructor string (via Expression), so reuse it
+	# instead of hand-rolling a string split.
+	var decoded = _deserialize(val)
+	if decoded is Vector3:
+		return decoded
+	if decoded is Vector3i:
+		return Vector3(decoded)
 	if val is String:
-		# PATCH 04: the documented "Vector3(x, y, z)" form was split on "," without
-		# stripping the constructor wrapper, so parts[0] was "Vector3(7" and
-		# to_float() silently yielded 0 -- the X component was dropped on every
-		# spawn-3d / transform-3d / inspect-level call while still returning status ok.
-		var text := (val as String).strip_edges()
-		if text.begins_with("Vector3("):
-			text = text.substr(8)
-		if text.ends_with(")"):
-			text = text.substr(0, text.length() - 1)
-		text = text.lstrip("([").rstrip(")]")
-		var parts := text.split(",")
+		var parts := (val as String).strip_edges().lstrip("([").rstrip(")]").split(",")
 		if parts.size() >= 3:
 			return Vector3(
 				parts[0].strip_edges().to_float(),
@@ -2194,6 +2267,703 @@ func _parse_vector3(val: Variant) -> Vector3:
 			)
 	return Vector3.ZERO
 
+
+func _parse_vector2(val: Variant) -> Vector2:
+	if val is Vector2:
+		return val
+	if val is Array and (val as Array).size() >= 2:
+		var a := val as Array
+		return Vector2(float(a[0]), float(a[1]))
+	var decoded = _deserialize(val)
+	if decoded is Vector2:
+		return decoded
+	if decoded is Vector2i:
+		return Vector2(decoded)
+	if val is String:
+		var parts := (val as String).strip_edges().lstrip("([").rstrip(")]").split(",")
+		if parts.size() >= 2:
+			return Vector2(parts[0].strip_edges().to_float(), parts[1].strip_edges().to_float())
+	return Vector2.ZERO
+
+
+# ============================================================
+# Performance metrics
+# ============================================================
+
+func _collect_performance_metrics() -> Dictionary:
+	var viewport := get_viewport()
+	return {
+		"fps": Performance.get_monitor(Performance.TIME_FPS),
+		"process_time_ms": Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
+		"physics_time_ms": Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
+		"navigation_time_ms": Performance.get_monitor(Performance.TIME_NAVIGATION_PROCESS) * 1000.0,
+		"viewport_size": _serialize(viewport.get_visible_rect().size),
+		"window_size": _serialize(Vector2i(DisplayServer.window_get_size())),
+		"render": {
+			"objects_in_frame": Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME),
+			"draw_calls": Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+			"primitives_in_frame": Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME),
+			"video_mem_used_bytes": Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED),
+			"texture_mem_used_bytes": Performance.get_monitor(Performance.RENDER_TEXTURE_MEM_USED),
+			"buffer_mem_used_bytes": Performance.get_monitor(Performance.RENDER_BUFFER_MEM_USED),
+			"method": RenderingServer.get_current_rendering_method(),
+		},
+		"physics": {
+			"2d_active_objects": Performance.get_monitor(Performance.PHYSICS_2D_ACTIVE_OBJECTS),
+			"2d_collision_pairs": Performance.get_monitor(Performance.PHYSICS_2D_COLLISION_PAIRS),
+			"2d_island_count": Performance.get_monitor(Performance.PHYSICS_2D_ISLAND_COUNT),
+			"3d_active_objects": Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS),
+			"3d_collision_pairs": Performance.get_monitor(Performance.PHYSICS_3D_COLLISION_PAIRS),
+			"3d_island_count": Performance.get_monitor(Performance.PHYSICS_3D_ISLAND_COUNT),
+		},
+		"memory": {
+			"static_bytes": Performance.get_monitor(Performance.MEMORY_STATIC),
+			"static_max_bytes": Performance.get_monitor(Performance.MEMORY_STATIC_MAX),
+			"message_buffer_max_bytes": Performance.get_monitor(Performance.MEMORY_MESSAGE_BUFFER_MAX),
+		},
+		"objects": {
+			"node_count": Performance.get_monitor(Performance.OBJECT_NODE_COUNT),
+			"orphan_nodes": Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT),
+			"resource_count": Performance.get_monitor(Performance.OBJECT_RESOURCE_COUNT),
+			"object_count": Performance.get_monitor(Performance.OBJECT_COUNT),
+		},
+		"audio": {
+			"output_latency_ms": Performance.get_monitor(Performance.AUDIO_OUTPUT_LATENCY) * 1000.0,
+		},
+		"engine_version": Engine.get_version_info(),
+	}
+
+
+func _cmd_metrics(_params: Dictionary) -> Dictionary:
+	return {"status": "ok", "data": _collect_performance_metrics()}
+
+# ============================================================
+# Runtime logs
+# ============================================================
+
+const LOG_LEVELS := {"info": 0, "warning": 1, "error": 2}
+
+
+func _parse_engine_log_lines(text: String, out: Array) -> void:
+	for raw_line in text.split("\n"):
+		var line := (raw_line as String).strip_edges()
+		if line.is_empty():
+			continue
+		var level := ""
+		if line.begins_with("SCRIPT ERROR") or line.begins_with("ERROR") or line.begins_with("USER ERROR"):
+			level = "error"
+		elif line.begins_with("WARNING") or line.begins_with("USER WARNING"):
+			level = "warning"
+		if level.is_empty():
+			continue
+		out.append({"level": level, "message": line, "source": "engine_log"})
+
+
+func _read_engine_log() -> Array:
+	var entries: Array = []
+	if not bool(ProjectSettings.get_setting("debug/file_logging/enable_file_logging", false)):
+		return entries
+	var log_path := str(ProjectSettings.get_setting("debug/file_logging/log_path", "user://logs/godot.log"))
+	if not FileAccess.file_exists(log_path):
+		return entries
+	var file := FileAccess.open(log_path, FileAccess.READ)
+	if file == null:
+		return entries
+	var size := file.get_length()
+	if size > MAX_FILE_BYTES:
+		file.seek(size - MAX_FILE_BYTES)
+	var text := file.get_as_text()
+	file.close()
+	_parse_engine_log_lines(text, entries)
+	return entries
+
+
+func _cmd_get_logs(params: Dictionary) -> Dictionary:
+	var level := str(params.get("level", "")).strip_edges().to_lower()
+	if not level.is_empty() and not LOG_LEVELS.has(level):
+		return {"status": "error", "error": "Unknown log level '%s'; expected info, warning or error" % level}
+
+	var entries: Array = []
+	for entry in _log_buffer:
+		entries.append({
+			"level": entry.get("level", "info"),
+			"message": entry.get("message", ""),
+			"timestamp_ms": entry.get("timestamp_ms", 0),
+			"source": "godot_cli",
+		})
+	var engine_entries := _read_engine_log()
+	entries.append_array(engine_entries)
+
+	if not level.is_empty():
+		var minimum: int = LOG_LEVELS[level]
+		entries = entries.filter(func(e: Dictionary) -> bool:
+			return int(LOG_LEVELS.get(str(e.get("level", "info")), 0)) >= minimum
+		)
+
+	var truncated := false
+	if entries.size() > MAX_LOG_RETURNED:
+		entries = entries.slice(entries.size() - MAX_LOG_RETURNED)
+		truncated = true
+
+	var error_count := 0
+	var warning_count := 0
+	for e in entries:
+		match str(e.get("level", "")):
+			"error": error_count += 1
+			"warning": warning_count += 1
+
+	var cleared := 0
+	if bool(params.get("clear", false)):
+		cleared = _log_buffer.size()
+		_log_buffer.clear()
+
+	return {"status": "ok", "data": {
+		"logs": entries,
+		"count": entries.size(),
+		"error_count": error_count,
+		"warning_count": warning_count,
+		"truncated": truncated,
+		"cleared": cleared,
+		"engine_log_available": not engine_entries.is_empty() or bool(
+			ProjectSettings.get_setting("debug/file_logging/enable_file_logging", false)
+		),
+	}}
+
+# ============================================================
+# Node discovery
+# ============================================================
+
+func _find_nodes_recursive(
+	node: Node,
+	pattern: String,
+	type_name: String,
+	group: String,
+	results: Array
+) -> void:
+	if results.size() >= MAX_FIND_RESULTS:
+		return
+	var matches := true
+	if not pattern.is_empty() and not str(node.name).match(pattern):
+		matches = false
+	if matches and not type_name.is_empty() and not node.is_class(type_name):
+		matches = false
+	if matches and not group.is_empty() and not node.is_in_group(group):
+		matches = false
+	if matches:
+		var info := {
+			"name": str(node.name),
+			"type": node.get_class(),
+			"path": str(node.get_path()),
+			"groups": node.get_groups(),
+		}
+		if node is Node3D:
+			info["position"] = _serialize((node as Node3D).global_position)
+		elif node is Node2D:
+			info["position"] = _serialize((node as Node2D).global_position)
+		results.append(info)
+	for child in node.get_children():
+		_find_nodes_recursive(child, pattern, type_name, group, results)
+
+
+func _cmd_find_nodes(params: Dictionary) -> Dictionary:
+	var pattern := str(params.get("pattern", "")).strip_edges()
+	var type_name := str(params.get("type", "")).strip_edges()
+	var group := str(params.get("group", "")).strip_edges()
+	var root_path := str(params.get("root", "")).strip_edges()
+
+	if pattern.is_empty() and type_name.is_empty() and group.is_empty():
+		return {"status": "error", "error": "Provide at least one of 'pattern', 'type' or 'group'"}
+	if not type_name.is_empty() and not ClassDB.class_exists(type_name):
+		return {"status": "error", "error": "Unknown node class: " + type_name}
+
+	var root: Node = null
+	if root_path.is_empty():
+		root = get_tree().current_scene if get_tree().current_scene else get_tree().root
+	else:
+		root = get_node_or_null(root_path)
+	if root == null:
+		return {"status": "error", "error": "Root node not found: " + root_path}
+
+	var results: Array = []
+	_find_nodes_recursive(root, pattern, type_name, group, results)
+	return {"status": "ok", "data": {
+		"nodes": results,
+		"count": results.size(),
+		"truncated": results.size() >= MAX_FIND_RESULTS,
+		"searched_from": str(root.get_path()),
+	}}
+
+# ============================================================
+# Signals
+# ============================================================
+
+func _cmd_list_signals(params: Dictionary) -> Dictionary:
+	var node_path := str(params.get("path", ""))
+	var node := get_node_or_null(node_path)
+	if node == null:
+		return {"status": "error", "error": "Node not found: " + node_path}
+
+	var signals: Array = []
+	for sig in node.get_signal_list():
+		var sig_name := str(sig.get("name", ""))
+		var args: Array = []
+		for arg in sig.get("args", []):
+			args.append({
+				"name": str(arg.get("name", "")),
+				"type": type_string(int(arg.get("type", TYPE_NIL))),
+			})
+		var connections: Array = []
+		for conn in node.get_signal_connection_list(sig_name):
+			var callable_value = conn.get("callable")
+			var target_desc := ""
+			if callable_value is Callable:
+				var target_obj = (callable_value as Callable).get_object()
+				if target_obj is Node:
+					target_desc = str((target_obj as Node).get_path())
+				elif target_obj != null:
+					target_desc = str(target_obj)
+				connections.append({
+					"target": target_desc,
+					"method": str((callable_value as Callable).get_method()),
+				})
+		signals.append({
+			"name": sig_name,
+			"args": args,
+			"connections": connections,
+			"connection_count": connections.size(),
+		})
+
+	return {"status": "ok", "data": {
+		"path": str(node.get_path()),
+		"signals": signals,
+		"count": signals.size(),
+	}}
+
+
+func _cmd_emit_signal(params: Dictionary) -> Dictionary:
+	var node_path := str(params.get("path", ""))
+	var signal_name := str(params.get("signal", "")).strip_edges()
+	var node := get_node_or_null(node_path)
+	if node == null:
+		return {"status": "error", "error": "Node not found: " + node_path}
+	if signal_name.is_empty():
+		return {"status": "error", "error": "Missing 'signal' parameter"}
+	if not node.has_signal(signal_name):
+		return {"status": "error", "error": "Node has no signal '%s'" % signal_name}
+
+	var raw_args = params.get("args", [])
+	if not raw_args is Array:
+		return {"status": "error", "error": "'args' must be an array"}
+	var call_args: Array = [signal_name]
+	for arg in raw_args:
+		call_args.append(_deserialize(arg))
+
+	var connection_count := 0
+	for conn in node.get_signal_connection_list(signal_name):
+		connection_count += 1
+
+	var err = node.callv("emit_signal", call_args)
+	if err is int and int(err) != OK:
+		return {"status": "error", "error": "emit_signal failed: " + error_string(int(err))}
+
+	_add_log("info", "Emitted signal %s on %s" % [signal_name, node_path])
+	return {"status": "ok", "data": {
+		"path": str(node.get_path()),
+		"signal": signal_name,
+		"arg_count": raw_args.size(),
+		"listeners_notified": connection_count,
+	}}
+
+# ============================================================
+# Physics queries
+# ============================================================
+
+func _serialize_collider(hit: Dictionary) -> Dictionary:
+	var out: Dictionary = {}
+	for key in hit.keys():
+		var value = hit[key]
+		if key == "collider":
+			if value is Node:
+				out["collider"] = str((value as Node).get_path())
+				out["collider_name"] = str((value as Node).name)
+				out["collider_type"] = (value as Node).get_class()
+			else:
+				out["collider"] = str(value)
+		elif key == "rid":
+			continue
+		else:
+			out[key] = _serialize(value)
+	return out
+
+
+func _run_ray_query(params: Dictionary) -> Dictionary:
+	var is_3d := bool(params.get("is_3d", true))
+	if is_3d:
+		var world := get_viewport().find_world_3d()
+		if world == null:
+			return {"status": "error", "error": "No 3D world available for raycast"}
+		var query := PhysicsRayQueryParameters3D.create(
+			_parse_vector3(params.get("from", Vector3.ZERO)),
+			_parse_vector3(params.get("to", Vector3.ZERO))
+		)
+		query.collide_with_areas = bool(params.get("collide_with_areas", false))
+		query.collide_with_bodies = bool(params.get("collide_with_bodies", true))
+		var hit := world.direct_space_state.intersect_ray(query)
+		return {"status": "ok", "data": {
+			"hit": not hit.is_empty(),
+			"space": "3d",
+			"result": _serialize_collider(hit),
+		}}
+
+	var world_2d := get_viewport().find_world_2d()
+	if world_2d == null:
+		return {"status": "error", "error": "No 2D world available for raycast"}
+	var query_2d := PhysicsRayQueryParameters2D.create(
+		_parse_vector2(params.get("from", Vector2.ZERO)),
+		_parse_vector2(params.get("to", Vector2.ZERO))
+	)
+	query_2d.collide_with_areas = bool(params.get("collide_with_areas", false))
+	query_2d.collide_with_bodies = bool(params.get("collide_with_bodies", true))
+	var hit_2d := world_2d.direct_space_state.intersect_ray(query_2d)
+	return {"status": "ok", "data": {
+		"hit": not hit_2d.is_empty(),
+		"space": "2d",
+		"result": _serialize_collider(hit_2d),
+	}}
+
+
+func _run_point_query(params: Dictionary) -> Dictionary:
+	var is_3d := bool(params.get("is_3d", true))
+	var max_results := clampi(int(params.get("max_results", 32)), 1, 256)
+	if is_3d:
+		var world := get_viewport().find_world_3d()
+		if world == null:
+			return {"status": "error", "error": "No 3D world available for point query"}
+		var query := PhysicsPointQueryParameters3D.new()
+		query.position = _parse_vector3(params.get("point", Vector3.ZERO))
+		query.collide_with_areas = bool(params.get("collide_with_areas", true))
+		query.collide_with_bodies = bool(params.get("collide_with_bodies", true))
+		var hits := world.direct_space_state.intersect_point(query, max_results)
+		var out: Array = []
+		for hit in hits:
+			out.append(_serialize_collider(hit))
+		return {"status": "ok", "data": {"space": "3d", "count": out.size(), "colliders": out}}
+
+	var world_2d := get_viewport().find_world_2d()
+	if world_2d == null:
+		return {"status": "error", "error": "No 2D world available for point query"}
+	var query_2d := PhysicsPointQueryParameters2D.new()
+	query_2d.position = _parse_vector2(params.get("point", Vector2.ZERO))
+	query_2d.collide_with_areas = bool(params.get("collide_with_areas", true))
+	query_2d.collide_with_bodies = bool(params.get("collide_with_bodies", true))
+	var hits_2d := world_2d.direct_space_state.intersect_point(query_2d, max_results)
+	var out_2d: Array = []
+	for hit in hits_2d:
+		out_2d.append(_serialize_collider(hit))
+	return {"status": "ok", "data": {"space": "2d", "count": out_2d.size(), "colliders": out_2d}}
+
+
+## Physics queries are deferred to _physics_process: direct_space_state is only
+## guaranteed to be current inside a physics callback.
+func _queue_physics_query(kind: String, params: Dictionary, client: Dictionary, id: String) -> void:
+	if _pending_physics.size() >= MAX_PENDING_WAITS:
+		_send(client, {"id": id, "status": "error", "error": "Too many pending physics queries"})
+		return
+	_pending_physics.append({"kind": kind, "params": params, "client": client, "id": id})
+
+# ============================================================
+# InputMap actions
+# ============================================================
+
+func _cmd_action_press(params: Dictionary) -> Dictionary:
+	var action := str(params.get("action", "")).strip_edges()
+	if action.is_empty():
+		return {"status": "error", "error": "Missing 'action' parameter"}
+	if not InputMap.has_action(action):
+		return {"status": "error", "error": "InputMap has no action '%s'" % action}
+	var raw_strength = params.get("strength", 1.0)
+	if not (raw_strength is int or raw_strength is float):
+		return {"status": "error", "error": "'strength' must be numeric"}
+	var strength := clampf(float(raw_strength), 0.0, 1.0)
+	Input.action_press(action, strength)
+	_add_log("info", "Pressed action %s (strength %.2f)" % [action, strength])
+	return {"status": "ok", "data": {"action": action, "strength": strength, "pressed": true}}
+
+
+func _cmd_action_release(params: Dictionary) -> Dictionary:
+	var action := str(params.get("action", "")).strip_edges()
+	if action.is_empty():
+		return {"status": "error", "error": "Missing 'action' parameter"}
+	if not InputMap.has_action(action):
+		return {"status": "error", "error": "InputMap has no action '%s'" % action}
+	Input.action_release(action)
+	_add_log("info", "Released action %s" % action)
+	return {"status": "ok", "data": {"action": action, "pressed": false}}
+
+# ============================================================
+# Batch execution
+# ============================================================
+
+const BATCH_FORBIDDEN := {
+	"batch_execute": true,
+	"wait_for": true,
+	"capture_sequence": true,
+	"highlight_node": true,
+	"query_ray": true,
+	"query_point": true,
+}
+
+
+func _cmd_batch_execute(params: Dictionary) -> Dictionary:
+	var raw = params.get("commands", [])
+	if not raw is Array:
+		return {"status": "error", "error": "'commands' must be an array"}
+	var commands: Array = raw
+	if commands.is_empty():
+		return {"status": "error", "error": "'commands' must not be empty"}
+	if commands.size() > MAX_BATCH_COMMANDS:
+		return {
+			"status": "error",
+			"error": "Batch exceeds the maximum of %d commands" % MAX_BATCH_COMMANDS,
+		}
+
+	var results: Array = []
+	var ok_count := 0
+	var error_count := 0
+	for entry in commands:
+		if not entry is Dictionary:
+			results.append({"status": "error", "error": "Each batch entry must be an object"})
+			error_count += 1
+			continue
+		var item: Dictionary = entry
+		var name := str(item.get("command", ""))
+		var item_params = item.get("params", {})
+		if not item_params is Dictionary:
+			results.append({"command": name, "status": "error", "error": "Invalid params"})
+			error_count += 1
+			continue
+		if BATCH_FORBIDDEN.has(name):
+			results.append({
+				"command": name,
+				"status": "error",
+				"error": "'%s' returns a deferred response and cannot run inside a batch" % name,
+			})
+			error_count += 1
+			continue
+		# _execute applies _command_denial per command, so each entry is gated individually.
+		var result = _execute(name, item_params)
+		if result == null:
+			result = {"status": "error", "error": "Command produced no response"}
+		var item_result: Dictionary = result
+		item_result["command"] = name
+		results.append(item_result)
+		if str(item_result.get("status", "")) == "ok":
+			ok_count += 1
+		else:
+			error_count += 1
+
+	return {"status": "ok", "data": {
+		"results": results,
+		"total": results.size(),
+		"ok_count": ok_count,
+		"error_count": error_count,
+	}}
+
+# ============================================================
+# Frame-deferred commands (capture sequences, timed highlights)
+# ============================================================
+
+func _check_pending_frames() -> void:
+	if _pending_frames.is_empty():
+		return
+	var now := Time.get_ticks_msec()
+	var to_remove: Array[int] = []
+
+	for i in range(_pending_frames.size()):
+		var job := _pending_frames[i]
+		match str(job["kind"]):
+			"capture":
+				var image := get_viewport().get_texture().get_image()
+				if image == null:
+					_send(job["client"], {
+						"id": job["id"],
+						"status": "error",
+						"error": "Failed to capture viewport",
+					})
+					to_remove.append(i)
+					continue
+				var frames: Array = job["frames"]
+				frames.append({
+					"index": frames.size(),
+					"base64_png": Marshalls.raw_to_base64(image.save_png_to_buffer()),
+					"width": image.get_width(),
+					"height": image.get_height(),
+					"timestamp_ms": now,
+				})
+				if frames.size() >= int(job["count"]):
+					_send(job["client"], {
+						"id": job["id"],
+						"status": "ok",
+						"data": {"frames": frames, "count": frames.size()},
+					})
+					to_remove.append(i)
+			"highlight":
+				if now >= int(job["expires_at_ms"]):
+					var marker = job["marker"]
+					if is_instance_valid(marker):
+						(marker as Node).queue_free()
+					_send(job["client"], {
+						"id": job["id"],
+						"status": "ok",
+						"data": {
+							"path": str(job["path"]),
+							"duration": float(job["duration"]),
+							"highlighted": true,
+						},
+					})
+					to_remove.append(i)
+
+	for i in range(to_remove.size() - 1, -1, -1):
+		_pending_frames.remove_at(to_remove[i])
+
+
+func _cmd_capture_sequence(params: Dictionary, client: Dictionary, id: String) -> void:
+	var raw_count = params.get("count", 5)
+	if not (raw_count is int or raw_count is float):
+		_send(client, {"id": id, "status": "error", "error": "'count' must be numeric"})
+		return
+	var count := int(raw_count)
+	if count < 1 or count > MAX_CAPTURE_FRAMES:
+		_send(client, {
+			"id": id,
+			"status": "error",
+			"error": "'count' must be between 1 and %d" % MAX_CAPTURE_FRAMES,
+		})
+		return
+	if _pending_frames.size() >= MAX_PENDING_WAITS:
+		_send(client, {"id": id, "status": "error", "error": "Too many pending frame jobs"})
+		return
+	_pending_frames.append({
+		"kind": "capture",
+		"client": client,
+		"id": id,
+		"count": count,
+		"frames": [],
+	})
+
+
+## Builds a bright unshaded wireframe box around the node's visual bounds. A separate
+## marker node is used rather than mutating the target's material, so nothing has to be
+## restored if the client disconnects mid-highlight.
+## Union of a node's own visual bounds and those of its descendants, in the node's
+## local space. Lets us frame nodes that carry no mesh themselves (a CharacterBody3D
+## whose geometry lives on a child MeshInstance3D, which is the common case).
+func _visual_bounds_3d(node: Node3D, root: Node3D) -> AABB:
+	var bounds := AABB()
+	var has_bounds := false
+	if node is VisualInstance3D:
+		var local := (node as VisualInstance3D).get_aabb()
+		var offset := root.to_local(node.global_position)
+		bounds = AABB(local.position + offset, local.size)
+		has_bounds = true
+	for child in node.get_children():
+		if not child is Node3D:
+			continue
+		var child_bounds := _visual_bounds_3d(child as Node3D, root)
+		if child_bounds.size == Vector3.ZERO:
+			continue
+		if has_bounds:
+			bounds = bounds.merge(child_bounds)
+		else:
+			bounds = child_bounds
+			has_bounds = true
+	return bounds
+
+
+## Builds a bright unshaded box around the node's visual bounds. A separate marker node
+## is used rather than mutating the target's material, so nothing has to be restored if
+## the client disconnects mid-highlight.
+func _build_highlight_marker(node: Node) -> Node:
+	if node is Node3D:
+		var target := node as Node3D
+		var bounds := _visual_bounds_3d(target, target)
+		var size := bounds.size * 1.08
+		# Nodes with no geometry at all still get a small locator box.
+		size.x = maxf(size.x, 0.25)
+		size.y = maxf(size.y, 0.25)
+		size.z = maxf(size.z, 0.25)
+		var mesh := BoxMesh.new()
+		mesh.size = size
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.albedo_color = Color(1.0, 0.85, 0.1, 0.4)
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		var marker := MeshInstance3D.new()
+		marker.name = "GodotCLIHighlight"
+		marker.mesh = mesh
+		marker.material_override = material
+		target.add_child(marker)
+		marker.position = bounds.get_center()
+		return marker
+
+	if node is CanvasItem:
+		var outline := ReferenceRect.new()
+		outline.name = "GodotCLIHighlight"
+		outline.border_color = Color(1.0, 0.85, 0.1, 1.0)
+		outline.border_width = 3.0
+		outline.editor_only = false
+		if node is Control:
+			outline.size = (node as Control).size
+		else:
+			outline.size = Vector2(64, 64)
+		(node as CanvasItem).add_child(outline)
+		return outline
+
+	return null
+
+
+func _cmd_highlight_node(params: Dictionary, client: Dictionary, id: String) -> void:
+	var node_path := str(params.get("path", ""))
+	var node := get_node_or_null(node_path)
+	if node == null:
+		_send(client, {"id": id, "status": "error", "error": "Node not found: " + node_path})
+		return
+	var raw_duration = params.get("duration", 2.0)
+	if not (raw_duration is int or raw_duration is float):
+		_send(client, {"id": id, "status": "error", "error": "'duration' must be numeric"})
+		return
+	var duration := float(raw_duration)
+	if duration <= 0.0 or duration > MAX_HIGHLIGHT_SECONDS:
+		_send(client, {
+			"id": id,
+			"status": "error",
+			"error": "'duration' must be greater than 0 and at most %.0f seconds" % MAX_HIGHLIGHT_SECONDS,
+		})
+		return
+	if _pending_frames.size() >= MAX_PENDING_WAITS:
+		_send(client, {"id": id, "status": "error", "error": "Too many pending frame jobs"})
+		return
+
+	var marker := _build_highlight_marker(node)
+	if marker == null:
+		_send(client, {
+			"id": id,
+			"status": "error",
+			"error": "Cannot highlight %s: not a VisualInstance3D or CanvasItem" % node.get_class(),
+		})
+		return
+
+	_add_log("info", "Highlighting %s for %.1fs" % [node_path, duration])
+	_pending_frames.append({
+		"kind": "highlight",
+		"client": client,
+		"id": id,
+		"path": str(node.get_path()),
+		"duration": duration,
+		"marker": marker,
+		"expires_at_ms": Time.get_ticks_msec() + int(duration * 1000.0),
+	})
 
 func _cmd_undo(_params: Dictionary) -> Dictionary:
 	_add_log("info", "Executed Undo operation")
