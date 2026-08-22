@@ -118,6 +118,7 @@ godot-cli set-property /root/Main/Player speed 300
 
 # Add a new node
 godot-cli add-node /root/Main Sprite2D --name Enemy
+godot-cli add-node /root/Main --script res://enemy.gd --name Boss   # live on arrival
 godot-cli add-node /root/Main CharacterBody2D --name Player \
   --props '{"position": "Vector2(400, 300)"}'
 
@@ -134,6 +135,8 @@ godot-cli call-method /root/Main/Player take_damage 25
 
 ```bash
 # Attach a script to a node
+# Attaching to a node already in the tree also runs its _ready(). Pass
+# --no-activate to skip that, e.g. when assembling a scene for save-scene.
 godot-cli attach-script /root/Main/Player res://scripts/player.gd
 
 # Detach script
@@ -314,10 +317,11 @@ func _physics_process(delta):
     move_and_slide()"
 
 # 2. Build the scene tree
-godot-cli add-node /root/Main CharacterBody2D --name Player
+# --script instantiates from the script, so the node comes up live: its _ready()
+# runs and the callbacks it overrides are enabled.
+godot-cli add-node /root/Main --script res://player.gd --name Player
 godot-cli add-node /root/Main/Player CollisionShape2D --name Collision
 godot-cli add-node /root/Main/Player Sprite2D --name Sprite
-godot-cli attach-script /root/Main/Player res://player.gd
 
 # 3. Validate the scene structure
 godot-cli validate-scene

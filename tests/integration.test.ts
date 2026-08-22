@@ -205,6 +205,124 @@ test(
       assert.equal(bad.status, "error");
     });
 
+    await t.test("add_node --script produces a live node", async () => {
+      // One call: instantiate from the script, so it is attached before the node
+      // enters the tree and the ready notification does its normal work.
+      const added = await client.send("add_node", {
+        parent: "/root/Main",
+        script: "res://probe.gd",
+        name: "Live",
+      });
+      assert.equal(added.status, "ok", added.error);
+      assert.equal((added.data as any).physics_processing, true);
+
+      const state = await client.send("eval", {
+        code: "var n = get_node('/root/Main/Live'); return [n.is_physics_processing(), n.ready_ran, n.bound != null]",
+      });
+      assert.deepEqual(state.data, [true, true, true]);
+    });
+
+    await t.test("attach_script activates a node already in the tree", async () => {
+      // set_script() sends no notification, and NOTIFICATION_READY is what turns on
+      // the process callbacks and calls _ready(). Without delivering it the node is
+      // inert while every command still reports ok.
+      await client.send("add_node", { parent: "/root/Main", type: "Node3D", name: "Bare" });
+      const attached = await client.send("attach_script", {
+        path: "/root/Main/Bare",
+        script: "res://probe.gd",
+      });
+      assert.equal(attached.status, "ok", attached.error);
+      assert.equal((attached.data as any).activated, true);
+      assert.equal((attached.data as any).physics_processing, true);
+
+      const state = await client.send("eval", {
+        code: "var n = get_node('/root/Main/Bare'); return [n.is_physics_processing(), n.ready_ran, n.bound != null]",
+      });
+      assert.deepEqual(state.data, [true, true, true]);
+    });
+
+    await t.test("attach_script activate=false leaves the node dormant", async () => {
+      // The escape hatch for assembling a scene to save: a _ready() that spawns
+      // nodes would otherwise be baked into the .tscn and run again on load.
+      await client.send("add_node", { parent: "/root/Main", type: "Node3D", name: "Dormant" });
+      const attached = await client.send("attach_script", {
+        path: "/root/Main/Dormant",
+        script: "res://probe.gd",
+        activate: false,
+      });
+      assert.equal((attached.data as any).activated, false);
+
+      const state = await client.send("eval", {
+        code: "var n = get_node('/root/Main/Dormant'); return [n.is_physics_processing(), n.ready_ran]",
+      });
+      assert.deepEqual(state.data, [false, false]);
+    });
+
+    await t.test("attach_script refuses a base-class mismatch", async () => {
+      // set_script() only prints on a mismatch, so this used to return ok having
+      // done nothing at all.
+      await client.send("add_node", { parent: "/root/Main", type: "Node", name: "WrongBase" });
+      const res = await client.send("attach_script", {
+        path: "/root/Main/WrongBase",
+        script: "res://probe.gd",
+      });
+      assert.equal(res.status, "error");
+      assert.match(String(res.error), /Node3D/);
+    });
+
+    await t.test("an assignment eval leaves the engine log clean", async () => {
+      // eval used to speculatively compile `return <code>`, so every assignment
+      // logged "Parse Error: Assignment is not allowed inside an expression" while
+      // still succeeding.
+      const before = await client.send("get_logs", { level: "error" });
+      const assigned = await client.send("eval", {
+        code: "get_node('/root/Main/Probe').position = Vector3(4, 5, 6)",
+      });
+      assert.equal(assigned.status, "ok", assigned.error);
+      assert.equal((assigned as any).form, "statement");
+
+      const after = await client.send("get_logs", { level: "error" });
+      assert.equal((after.data as any).error_count, (before.data as any).error_count);
+
+      const readBack = await client.send("eval", {
+        code: "get_node('/root/Main/Probe').position.x",
+      });
+      assert.equal((readBack as any).form, "expression");
+      assert.equal(readBack.data, 4);
+    });
+
+    await t.test("assert rejects a method name but still reads plain vars", async () => {
+      // node.get() returns a Callable for a method, which reads as truthy -- so this
+      // used to pass for the wrong reason.
+      const method = await client.send("assert", {
+        checks: [{ path: "/root/Main/Live", property: "is_physics_processing", equals: true }],
+      });
+      const failed = (method.data as any).results[0];
+      assert.equal(failed.passed, false);
+      assert.match(String(failed.error), /is a method, not a property/);
+
+      // Non-exported script variables are in the property list, so they keep working.
+      const plain = await client.send("assert", {
+        checks: [{ path: "/root/Main/Live", property: "plain_var", equals: 42 }],
+      });
+      assert.equal((plain.data as any).passed, true);
+
+      // A failed comparison now reports what it expected.
+      const mismatch = await client.send("assert", {
+        checks: [{ path: "/root/Main/Live", property: "plain_var", equals: 7 }],
+      });
+      assert.equal((mismatch.data as any).results[0].expected, 7);
+    });
+
+    await t.test("add_node with a script is gated as unsafe", async () => {
+      // Instantiating from a script executes project code, exactly like attach_script.
+      const cat = await client.send("commands");
+      const entries = (cat.data as any).commands as Array<Record<string, any>>;
+      const entry = entries.find((e) => e.name === "add_node");
+      assert.ok(entry, "add_node missing from the catalogue");
+      assert.equal(entry.conditionally_unsafe, true);
+    });
+
     await t.test("the server survives the game being paused", async () => {
       // The autoload used to inherit PROCESS_MODE_INHERIT, so pausing stopped the
       // _process() that polls the socket -- wedging the tool with no way back.

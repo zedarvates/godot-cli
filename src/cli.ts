@@ -82,18 +82,20 @@ SCENE TREE
 NODE OPERATIONS
   get-node <path>                           Get ALL properties of a node
   set-property <path> <prop> <value>        Set a property (supports Vector2, Color, etc.)
-  add-node <parent> <type> [--name N]       Create a node (e.g. Node2D, Sprite2D)
+  add-node <parent> [type] [--script S]     Create a node; --script makes it live (runs _ready)
   remove-node <path>                        Remove a node from the tree
   rename-node <path> <name>                 Rename a node
   reparent-node <path> <new-parent>         Move a node to a new parent
   call-method <path> <method> [args...]     Call any method on a node
 
 SCRIPTS
-  attach-script <node> <script>             Attach a .gd or .cs script to a node
+  attach-script <node> <script>             Attach a script and run its _ready()
+  attach-script ... --no-activate           Attach without running _ready() (for save-scene)
   detach-script <node>                      Remove script from a node
 
 GDSCRIPT EXECUTION
-  eval <code>                               Run GDScript in the live game (single expr auto-returns)
+  eval <code>                               Run GDScript live. A single expression auto-returns;
+                                            in a statement body, write an explicit 'return'
 
 INPUT SIMULATION
   click <x> <y> [--button left|right]       Simulate mouse click at coordinates
@@ -213,16 +215,28 @@ program
   .command("add-node")
   .description("Add a new node to the scene tree")
   .argument("<parent>", "Parent node path")
-  .argument("<type>", "Node class (e.g. Node2D, Sprite2D)")
+  .argument("[type]", "Node class (e.g. Node2D, Sprite2D). Optional when --script is given")
   .option("--name <name>", "Node name")
   .option("--props <json>", "Initial properties as JSON object")
+  .option(
+    "--script <path>",
+    "Instantiate from this script (res://...) so the node comes up live -- _ready() and " +
+      "the process callbacks run. Adding a bare node and attaching a script afterwards " +
+      "cannot do this, because the ready notification has already passed."
+  )
   .action(
     async (
       parent: string,
-      type: string,
-      opts: { name?: string; props?: string }
+      type: string | undefined,
+      opts: { name?: string; props?: string; script?: string }
     ) => {
-      const params: Record<string, unknown> = { parent, type };
+      if (!type && !opts.script) {
+        process.stderr.write("Provide a node type, --script, or both\n");
+        process.exit(1);
+      }
+      const params: Record<string, unknown> = { parent };
+      if (type) params.type = type;
+      if (opts.script) params.script = opts.script;
       if (opts.name) params.name = opts.name;
       if (opts.props) params.properties = JSON.parse(opts.props);
       await run("add_node", params);
@@ -272,11 +286,20 @@ program
 
 program
   .command("attach-script")
-  .description("Attach a script to a node")
+  .description("Attach a script to a node and run its _ready()")
   .argument("<node-path>", "Node path")
   .argument("<script-path>", "Script path (e.g. res://player.gd)")
-  .action(async (nodePath: string, scriptPath: string) => {
-    await run("attach_script", { path: nodePath, script: scriptPath });
+  .option(
+    "--no-activate",
+    "Attach without running _ready(). Use when assembling a scene for save-scene, " +
+      "where a _ready() that spawns nodes would bake them into the .tscn"
+  )
+  .action(async (nodePath: string, scriptPath: string, opts: { activate: boolean }) => {
+    await run("attach_script", {
+      path: nodePath,
+      script: scriptPath,
+      activate: opts.activate,
+    });
   });
 
 program
