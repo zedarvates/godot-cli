@@ -3,6 +3,21 @@
 All notable changes to this fork are documented here. The project uses
 pre-release versions until the public API and operational boundary are stable.
 
+## Unreleased
+
+### Added
+
+- Read-only `template registry inspect <root>` for bounded catalog v2, profile,
+  contract, schema-link, exact SHA-256, strict-content, and `godot-vr`
+  compatibility-evidence inspection.
+
+### Known boundaries
+
+- Inspection does not execute JSON Schema, recompute canonical
+  `spec_checksum`, detect duplicate JSON keys, validate, instantiate, migrate,
+  run registry Python, start Godot, access the network, or prove runtime
+  compatibility.
+
 ## 0.1.0-uo.7 — 2026-08-14
 
 ### Added

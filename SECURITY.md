@@ -74,6 +74,28 @@ Godot, import assets, follow symbolic links, or write project files.
 - Static scanning cannot validate Godot's binary UID cache. UID use is reported
   as requiring a later runtime scene-load gate.
 
+## Template registry inspection boundary
+
+`template registry inspect <root>` is local, tokenless, read-only, and is not a
+live runtime/addon command.
+
+- The explicit root, fixed `templates/catalog.json`, and every named file are
+  canonicalized. Symlinks, junction escapes, traversal, absolute/UNC/drive
+  paths, URLs, query/fragment, NUL, backslash, and malformed percent encoding
+  fail closed.
+- The command reads only catalogued files. Catalog, entries, aliases, individual
+  JSON files, total bytes, JSON depth/arrays/strings/values, and findings are
+  bounded before or during access. File-size totals are checked before hashing.
+- Known profiles and contract versions are closed. Legacy never counts as
+  strict content. `intended_consumers` never counts as compatibility.
+- Consumer readiness requires a verified strict family schema, linked strict
+  template, and closed evidence-bearing `godot-vr` compatibility record.
+- No child process, Python, Godot, network operation, schema evaluator, addon,
+  MCP tool, template mutation, or migration is used.
+- Node JSON parsing does not detect duplicate keys. Inspection also does not
+  execute JSON Schema or recompute canonical `spec_checksum`; the registry's
+  own validator remains authoritative for those publication gates.
+
 ## Managed process boundary
 
 `runtime start/status/logs/stop` use a per-project registry outside the Godot

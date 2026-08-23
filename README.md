@@ -247,6 +247,31 @@ import/cache data; this command is not GPU, visual-quality, or OpenXR proof.
 `valid: false, complete: true` means the full proof ran and found a structural
 defect; `complete: false` means the validation evidence itself is incomplete.
 
+### Template registry inspection
+
+```bash
+uo-godot-cli template registry inspect /path/to/ultod-json-template-registry
+```
+
+This local, tokenless, read-only command verifies catalog v2 structure, known
+validation profiles, confined catalog paths, exact full-file SHA-256, the common
+contract schema, strict family schema links, strict template identity, and
+evidence-bearing `godot-vr` compatibility records. It reads only
+`templates/catalog.json` and files named by that catalog; it does not scan the
+tree or access the network.
+
+Readiness is deliberately layered. `integrityReady` means the bounded
+inspection completed without error. `strictContentReady` additionally requires
+at least one verified strict family schema and linked `strict-v1` template.
+`consumerReady` additionally requires exact `godot-vr` compatibility evidence.
+An integral legacy-only registry returns exit 0 with `consumerReady: false`;
+legacy entries and `intended_consumers` hints never count as compatibility.
+
+Inspection does not execute Draft 2020-12, recompute canonical
+`spec_checksum`, detect duplicate JSON keys, validate or instantiate a template,
+migrate content, run Python/Godot, or prove runtime compatibility. Accordingly,
+`template validate`, `instantiate`, and `migrate` are not exposed.
+
 ### Project test profiles
 
 ```bash
@@ -402,6 +427,7 @@ Only loopback hosts are accepted. `localhost` is resolved and revalidated before
 
 | Gate | Result | Proof boundary |
 |---|---|---|
+| Template registry inspection + real registry, 2026-08-23 | **75 passed, 0 failed, 14 skipped** out of 89 | Installed CLI plus two deterministic read-only passes over 4,064 catalogued files; 4,063 legacy, one common strict schema, zero strict templates, integrity ready and consumer not ready. Godot/Fovea tests remained explicitly skipped; inspection is not schema validation, instantiation, migration, or runtime compatibility proof. |
 | Default `npm test`, 2026-08-14 | **69 passed, 0 failed, 14 skipped** out of 83 | Build, Node protocol, compatibility catalog, installer, package consumer, project preflight, readiness, security invariants, managed-process controls, test-profile positives/negatives, and local scene-validation negatives. Real Godot and Fovea scenarios were explicitly skipped. |
 | Godot 4.7-dev5 local integration gate, 2026-08-14 | **82 passed, 0 failed, 1 skipped** out of 83 | Real headless Godot protocol, managed lifecycle, clean/structural/parse-error scene proofs, and a real `godot_script` test profile. Only the cross-repository FoveaEngine scenario was skipped. |
 | Fully configured local integration gate, 2026-08-14 | **83 passed, 0 failed, 0 skipped** with Godot 4.7-dev5 and the local FoveaEngine checkout | CLI/addon runtime, compatibility fail-closed controls, managed-process lifecycle, bounded test profiles, clean/error scene validation, and a temporary one-splat Fovea project; not GPU, visual-quality, production, or OpenXR proof. |
