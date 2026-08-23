@@ -285,6 +285,49 @@ test("inspection requires exact compatibility evidence beyond intended consumers
   assert.equal(compatible.godotCompatibleTemplates, 1);
   assert.equal(compatible.consumerReady, true);
   assert.deepEqual(compatible.reasons, []);
+
+  catalog.entries.at(-1).unexpected = true;
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+  const unknownField = await inspectTemplateRegistry({ root });
+  assert.equal(unknownField.status, "error");
+  assert.ok(
+    unknownField.findings.some(
+      (finding) => finding.code === "REGISTRY_ENTRY_INVALID"
+    )
+  );
+  delete catalog.entries.at(-1).unexpected;
+
+  const missingDependencyTemplate = JSON.stringify({
+    ...JSON.parse(compatibleTemplate),
+    dependencies: ["items:missing@1.0.0"],
+  });
+  await fs.writeFile(templateFile, missingDependencyTemplate, "utf8");
+  catalog.entries.at(-1).sha256 = sha256(missingDependencyTemplate);
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+  const missingDependency = await inspectTemplateRegistry({ root });
+  assert.equal(missingDependency.status, "error");
+  assert.ok(
+    missingDependency.findings.some(
+      (finding) => finding.code === "REGISTRY_REFERENCE_MISSING"
+    )
+  );
+
+  await fs.writeFile(templateFile, compatibleTemplate, "utf8");
+  catalog.entries.at(-1).sha256 = sha256(compatibleTemplate);
+  catalog.aliases = [
+    {
+      from: "monsters:forest-wolf@1.0.0",
+      to: "monsters:missing@1.0.0",
+    },
+  ];
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+  const missingAliasTarget = await inspectTemplateRegistry({ root });
+  assert.equal(missingAliasTarget.status, "error");
+  assert.ok(
+    missingAliasTarget.findings.some(
+      (finding) => finding.code === "REGISTRY_REFERENCE_MISSING"
+    )
+  );
 });
 
 test("template registry inspect CLI emits a complete false-readiness JSON report", async (t) => {

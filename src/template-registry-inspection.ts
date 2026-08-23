@@ -298,6 +298,35 @@ function validateBaseEntry(
   if (profile !== "legacy-unvalidated" && value.contract_version !== "1.0.0") {
     throw new Error(`entries/${index} strict contract_version must be 1.0.0`);
   }
+  if (profile === "strict-schema-v1") {
+    exactKeys(
+      value,
+      [
+        "name", "kind", "version", "status", "file", "sha256",
+        "compatibility", "validation_profile", "contract_version",
+      ],
+      `entries/${index}`
+    );
+  }
+  if (profile === "strict-v1") {
+    const allowed = new Set([
+      "name", "kind", "version", "status", "file", "sha256",
+      "compatibility", "validation_profile", "contract_version", "id",
+      "slug", "family", "schema_file", "spec_checksum",
+      "intended_consumers", "supersedes", "provenance_ref", "superseded_by",
+    ]);
+    for (const key of Object.keys(value)) {
+      if (!allowed.has(key)) throw new Error(`entries/${index} contains unknown field: ${key}`);
+    }
+    for (const key of [
+      "name", "kind", "version", "status", "file", "sha256",
+      "compatibility", "validation_profile", "contract_version", "id",
+      "slug", "family", "schema_file", "spec_checksum",
+      "intended_consumers", "supersedes",
+    ]) {
+      if (!(key in value)) throw new Error(`entries/${index} is missing field: ${key}`);
+    }
+  }
   return { entry: value, profile };
 }
 
@@ -616,12 +645,14 @@ export async function inspectTemplateRegistry(
 
   let strictTemplates = 0;
   let godotCompatibleTemplates = 0;
+  const strictDocuments = new Map<string, VerifiedEntry>();
   for (const item of verified) {
     if (item.entry.validation_profile !== "strict-v1") continue;
     try {
       const compatible = validateStrictTemplate(item, validFamilySchemaResources);
       strictTemplates += 1;
       if (compatible) godotCompatibleTemplates += 1;
+      strictDocuments.set(`${item.entry.id}@${item.entry.version}`, item);
     } catch (error) {
       findings.push({
         severity: "error",
@@ -629,6 +660,102 @@ export async function inspectTemplateRegistry(
         location: item.resource,
         message: error instanceof Error ? error.message : String(error),
       });
+    }
+  }
+  const referencePattern =
+    /^[a-z0-9]+(?:-[a-z0-9]+)*:[a-z0-9]+(?:-[a-z0-9]+)*@(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
+  for (const [source, item] of strictDocuments) {
+    const document = item.value as Record<string, unknown>;
+    const dependencies = document.dependencies as unknown[];
+    const supersedes = item.entry.supersedes as unknown[];
+    for (const [kind, references] of [
+      ["dependency", dependencies],
+      ["superseded", supersedes],
+    ] as const) {
+      const seen = new Set<string>();
+      for (const reference of references) {
+        if (typeof reference !== "string" || !referencePattern.test(reference)) {
+          findings.push({
+            severity: "error",
+            code: "REGISTRY_REFERENCE_MISSING",
+            location: item.resource,
+            message: `${source} has malformed ${kind} reference`,
+          });
+          continue;
+        }
+        if (seen.has(reference) || reference === source || !strictDocuments.has(reference)) {
+          findings.push({
+            severity: "error",
+            code: "REGISTRY_REFERENCE_MISSING",
+            location: item.resource,
+            message: `${source} has unresolved, duplicate, or self ${kind} reference ${reference}`,
+          });
+        }
+        seen.add(reference);
+      }
+    }
+    const successor = item.entry.superseded_by;
+    if (
+      successor !== undefined &&
+      (typeof successor !== "string" ||
+        !referencePattern.test(successor) ||
+        successor === source ||
+        !strictDocuments.has(successor))
+    ) {
+      findings.push({
+        severity: "error",
+        code: "REGISTRY_REFERENCE_MISSING",
+        location: item.resource,
+        message: `${source} has invalid superseded_by reference`,
+      });
+    }
+  }
+
+  const aliases = new Map<string, string>();
+  for (const [index, alias] of catalog.aliases.entries()) {
+    try {
+      if (!isRecord(alias)) throw new Error("alias must be an object");
+      exactKeys(alias, ["from", "to"], `aliases/${index}`);
+      const source = boundedNonEmptyString(alias.from, `aliases/${index}/from`);
+      const target = boundedNonEmptyString(alias.to, `aliases/${index}/to`);
+      if (
+        !referencePattern.test(source) ||
+        !referencePattern.test(target) ||
+        source === target ||
+        aliases.has(source) ||
+        !strictDocuments.has(source) ||
+        !strictDocuments.has(target)
+      ) {
+        throw new Error(`alias ${source} -> ${target} is invalid or unresolved`);
+      }
+      aliases.set(source, target);
+    } catch (error) {
+      findings.push({
+        severity: "error",
+        code: "REGISTRY_REFERENCE_MISSING",
+        location: `/aliases/${index}`,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  for (const start of [...aliases.keys()].sort()) {
+    const positions = new Map<string, number>();
+    const chain: string[] = [];
+    let current: string | undefined = start;
+    while (current !== undefined && aliases.has(current)) {
+      const position = positions.get(current);
+      if (position !== undefined) {
+        findings.push({
+          severity: "error",
+          code: "REGISTRY_ALIAS_CYCLE",
+          location: "/aliases",
+          message: `Alias cycle: ${[...chain.slice(position), current].join(" -> ")}`,
+        });
+        break;
+      }
+      positions.set(current, chain.length);
+      chain.push(current);
+      current = aliases.get(current);
     }
   }
 
