@@ -217,6 +217,90 @@ function boundedNonEmptyString(value: unknown, name: string): string {
   return value;
 }
 
+function pathIdentity(value: string): string {
+  return process.platform === "win32" ? value.toLowerCase() : value;
+}
+
+function validateResourcePath(resource: string): void {
+  if (
+    resource.length === 0 ||
+    resource.includes("\\") ||
+    resource.includes("\0") ||
+    resource.includes("?") ||
+    resource.includes("#") ||
+    resource.startsWith("/") ||
+    resource.startsWith("//") ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(resource)
+  ) {
+    throw new Error(`Registry path is forbidden: ${resource}`);
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(resource);
+  } catch {
+    throw new Error(`Registry path has invalid percent encoding: ${resource}`);
+  }
+  for (const candidate of [resource, decoded]) {
+    const segments = candidate.replaceAll("\\", "/").split("/");
+    if (
+      segments.some((segment) => segment === "" || segment === "." || segment === "..") ||
+      candidate.startsWith("/") ||
+      /^[A-Za-z][A-Za-z0-9+.-]*:/.test(candidate)
+    ) {
+      throw new Error(`Registry path contains forbidden segments: ${resource}`);
+    }
+  }
+}
+
+interface VerifiedEntry {
+  entry: Record<string, unknown>;
+  resource: string;
+  value: unknown;
+  bytes: number;
+}
+
+function validateBaseEntry(
+  value: unknown,
+  index: number
+): { entry: Record<string, unknown>; profile: keyof TemplateRegistryInspectionReport["profiles"] } {
+  if (!isRecord(value)) throw new Error(`Catalog entry ${index} must be an object`);
+  for (const key of [
+    "name",
+    "kind",
+    "version",
+    "status",
+    "file",
+    "sha256",
+    "validation_profile",
+  ]) {
+    boundedNonEmptyString(value[key], `entries/${index}/${key}`);
+  }
+  if (!Array.isArray(value.compatibility)) {
+    throw new Error(`entries/${index}/compatibility must be an array`);
+  }
+  if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(String(value.version))) {
+    throw new Error(`entries/${index}/version must be SemVer`);
+  }
+  if (!/^[0-9a-f]{64}$/.test(String(value.sha256))) {
+    throw new Error(`entries/${index}/sha256 is malformed`);
+  }
+  const profile = value.validation_profile;
+  if (
+    profile !== "legacy-unvalidated" &&
+    profile !== "strict-schema-v1" &&
+    profile !== "strict-v1"
+  ) {
+    throw new Error(`entries/${index}/validation_profile is unknown`);
+  }
+  if (profile === "legacy-unvalidated" && value.contract_version !== null) {
+    throw new Error(`entries/${index} legacy contract_version must be null`);
+  }
+  if (profile !== "legacy-unvalidated" && value.contract_version !== "1.0.0") {
+    throw new Error(`entries/${index} strict contract_version must be 1.0.0`);
+  }
+  return { entry: value, profile };
+}
+
 function commonContractEntry(entries: unknown[]): Record<string, unknown> {
   const matches = entries.filter(
     (entry) =>
@@ -280,54 +364,123 @@ export async function inspectTemplateRegistry(
     throw new Error("Registry alias count exceeds the limit");
   }
 
+  const findings: RegistryFinding[] = [];
+  const profiles: TemplateRegistryInspectionReport["profiles"] = {
+    "legacy-unvalidated": 0,
+    "strict-schema-v1": 0,
+    "strict-v1": 0,
+  };
+  const verified: VerifiedEntry[] = [];
+  const seenPaths = new Set<string>();
+  let verifiedBytes = 0;
+  for (const [index, rawEntry] of catalog.entries.entries()) {
+    try {
+      const { entry, profile } = validateBaseEntry(rawEntry, index);
+      profiles[profile] += 1;
+      const resource = String(entry.file);
+      validateResourcePath(resource);
+      const identity = pathIdentity(resource);
+      if (seenPaths.has(identity)) {
+        throw new Error(`Duplicate catalog path: ${resource}`);
+      }
+      seenPaths.add(identity);
+      const file = await readJson(
+        root,
+        resource,
+        MAX_REGISTRY_REFERENCED_FILE_BYTES
+      );
+      if (verifiedBytes + file.bytes > MAX_REGISTRY_TOTAL_BYTES) {
+        throw new Error("Registry referenced bytes exceed the total limit");
+      }
+      const actualChecksum = await sha256File(file.absolutePath);
+      if (actualChecksum !== entry.sha256) {
+        findings.push({
+          severity: "error",
+          code: "REGISTRY_CHECKSUM_MISMATCH",
+          location: `/entries/${index}/sha256`,
+          message: `Checksum does not match ${resource}`,
+        });
+        continue;
+      }
+      verifiedBytes += file.bytes;
+      verified.push({ entry, resource, value: file.value, bytes: file.bytes });
+    } catch (error) {
+      findings.push({
+        severity: "error",
+        code:
+          error instanceof Error && /path|outside|escape|segment|percent/i.test(error.message)
+            ? "REGISTRY_PATH_FORBIDDEN"
+            : error instanceof Error && /limit|exceed/i.test(error.message)
+              ? "REGISTRY_LIMIT_EXCEEDED"
+              : "REGISTRY_ENTRY_INVALID",
+        location: `/entries/${index}`,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   const entry = commonContractEntry(catalog.entries);
-  const declaredChecksum = boundedNonEmptyString(entry.sha256, "contract sha256");
-  if (!/^[0-9a-f]{64}$/.test(declaredChecksum)) {
-    throw new Error("Template contract checksum is malformed");
-  }
-  const schemaFile = await readJson(
-    root,
-    CONTRACT_RESOURCE,
-    MAX_REGISTRY_REFERENCED_FILE_BYTES
+  const verifiedContract = verified.find(
+    (item) => item.resource === CONTRACT_RESOURCE
   );
-  if ((await sha256File(schemaFile.absolutePath)) !== declaredChecksum) {
-    throw new Error("Template contract checksum does not match catalog");
+  let contractReady = false;
+  if (verifiedContract !== undefined) {
+    try {
+      validateCommonSchema(verifiedContract.value);
+      contractReady = true;
+    } catch (error) {
+      findings.push({
+        severity: "error",
+        code: "REGISTRY_CONTRACT_INVALID",
+        location: CONTRACT_RESOURCE,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  } else if (!findings.some((finding) => finding.location.includes("sha256"))) {
+    findings.push({
+      severity: "error",
+      code: "REGISTRY_CONTRACT_INVALID",
+      location: CONTRACT_RESOURCE,
+      message: "Template contract file was not verified",
+    });
   }
-  validateCommonSchema(schemaFile.value);
+
+  findings.sort((left, right) =>
+    left.code.localeCompare(right.code) ||
+    left.location.localeCompare(right.location) ||
+    left.message.localeCompare(right.message)
+  );
+  const integral = findings.every((finding) => finding.severity !== "error");
 
   return {
-    status: "ok",
-    complete: true,
+    status: integral ? "ok" : "error",
+    complete: integral,
     registryRoot: root,
     catalog: {
       resource: CATALOG_RESOURCE,
       registryVersion: "2.0.0",
       entries: catalog.entries.length,
       aliases: catalog.aliases.length,
-      verifiedFiles: 1,
-      verifiedBytes: schemaFile.bytes,
+      verifiedFiles: verified.length,
+      verifiedBytes,
     },
-    profiles: {
-      "legacy-unvalidated": 0,
-      "strict-schema-v1": 1,
-      "strict-v1": 0,
-    },
+    profiles,
     contract: {
       version: "1.0.0",
       schemaFile: CONTRACT_RESOURCE,
-      ready: true,
+      ready: contractReady && integral,
     },
     strictFamilySchemas: 0,
     strictTemplates: 0,
     godotCompatibleTemplates: 0,
-    integrityReady: true,
+    integrityReady: integral,
     strictContentReady: false,
     consumerReady: false,
     reasons: [
       "No strict family schema is catalogued.",
       "No strict-v1 template is catalogued.",
     ],
-    findings: [],
+    findings: findings.slice(0, MAX_REGISTRY_FINDINGS),
     boundaries: [BOUNDARY],
   };
 }

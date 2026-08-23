@@ -92,3 +92,44 @@ test("inspection accepts an integral common-contract-only registry as not ready"
   assert.equal(report.catalog.entries, 1);
   assert.equal(report.catalog.verifiedFiles, 1);
 });
+
+test("inspection counts mixed profiles and rejects a referenced checksum change", async (t) => {
+  const root = await createRegistry(t);
+  const resource = "templates/items/iron-token/v0.1.0/template.json";
+  const contents = JSON.stringify({ name: "iron-token" });
+  const file = path.join(root, ...resource.split("/"));
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, contents, "utf8");
+  const catalogFile = path.join(root, "templates", "catalog.json");
+  const catalog = JSON.parse(await fs.readFile(catalogFile, "utf8"));
+  catalog.entries.unshift({
+    name: "iron-token",
+    kind: "item-template",
+    version: "0.1.0",
+    status: "experimental",
+    file: resource,
+    sha256: sha256(contents),
+    compatibility: [],
+    validation_profile: "legacy-unvalidated",
+    contract_version: null,
+  });
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+
+  const clean = await inspectTemplateRegistry({ root });
+  assert.equal(clean.status, "ok");
+  assert.equal(clean.profiles["legacy-unvalidated"], 1);
+  assert.equal(clean.catalog.verifiedFiles, 2);
+  assert.equal(clean.catalog.verifiedBytes > contents.length, true);
+
+  await fs.writeFile(file, `${contents}\n`, "utf8");
+  const changed = await inspectTemplateRegistry({ root });
+  assert.equal(changed.status, "error");
+  assert.equal(changed.complete, false);
+  assert.equal(changed.integrityReady, false);
+  assert.equal(changed.consumerReady, false);
+  assert.ok(
+    changed.findings.some(
+      (finding) => finding.code === "REGISTRY_CHECKSUM_MISMATCH"
+    )
+  );
+});
