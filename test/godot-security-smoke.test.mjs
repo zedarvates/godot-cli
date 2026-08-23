@@ -236,6 +236,40 @@ test(
 );
 
 test(
+  "real Godot runtime requires the unsafe gate for scripted add_node",
+  { skip: !GODOT_BIN },
+  async () => {
+    const port = await reservePort();
+    const child = launch(port, {
+      ...process.env,
+      GODOT_CLI_TOKEN: TOKEN,
+      GODOT_CLI_ALLOW_MUTATIONS: "1",
+      GODOT_CLI_ALLOW_UNSAFE: "",
+    });
+    try {
+      await waitForReady(child);
+      const client = new GodotClient({ port, token: TOKEN });
+      const bare = await client.send("add_node", {
+        parent: "/root/SecurityFixture",
+        type: "Node3D",
+        name: "AllowedBareNode",
+      });
+      assert.equal(bare.status, "ok", bare.error);
+
+      const scripted = await client.send("add_node", {
+        parent: "/root/SecurityFixture",
+        script: "res://probe_activation.gd",
+        name: "RejectedScriptedNode",
+      });
+      assert.equal(scripted.status, "error");
+      assert.match(scripted.error, /Unsafe commands are disabled/);
+    } finally {
+      await stop(child);
+    }
+  }
+);
+
+test(
   "real Godot runtime caps stalled unauthenticated clients",
   { skip: !GODOT_BIN },
   async () => {

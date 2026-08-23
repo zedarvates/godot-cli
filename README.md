@@ -336,9 +336,20 @@ Requires `GODOT_CLI_ALLOW_UNSAFE=1` before Godot starts:
 uo-godot-cli eval "get_tree().current_scene.name"
 uo-godot-cli call-method /root/Main/Player take_damage 25
 uo-godot-cli attach-script /root/Main/Player res://scripts/player.gd
+uo-godot-cli attach-script /root/Main/Template res://scripts/template.gd --no-activate
 uo-godot-cli create-file res://scripts/generated.gd --content "extends Node"
 uo-godot-cli save-scene --path res://scenes/modified.tscn
 ```
+
+`attach-script` activates the newly attached script by delivering its ready lifecycle, so `_ready()`, `@onready`, and process callbacks are live immediately. Use `--no-activate` only while assembling a scene for a later `save-scene` when running `_ready()` would create nodes that should not be baked into the scene.
+
+For a new scripted node, prefer the one-step form below. It attaches the script before the node enters the tree and therefore requires both the mutation and unsafe gates:
+
+```bash
+uo-godot-cli add-node /root/Main --script res://scripts/player.gd --name Player
+```
+
+Single-expression `eval` calls return their value automatically. Statement bodies return `null` unless they contain an explicit `return`; assignments are classified as statements without emitting a speculative parse error.
 
 File operations are confined to `res://`; individual files are limited to 4 MiB.
 

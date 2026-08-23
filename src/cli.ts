@@ -138,7 +138,7 @@ SCENE TREE
 NODE OPERATIONS
   get-node <path>                           Get ALL properties of a node
   set-property <path> <prop> <value>        Set a property (supports Vector2, Color, etc.)
-  add-node <parent> <type> [--name N]       Create a node (e.g. Node2D, Sprite2D)
+  add-node <parent> [type] [--script PATH]  Create a live node; scripted creation runs _ready()
   remove-node <path>                        Remove a node from the tree
   rename-node <path> <name>                 Rename a node
   reparent-node <path> <new-parent>         Move a node to a new parent
@@ -150,11 +150,12 @@ OPTIONAL FOVEACORE
   fovea validate                            Validate every FoveaSplat3D source and setting
 
 SCRIPTS
-  attach-script <node> <script>             Attach a .gd or .cs script to a node
+  attach-script <node> <script>             Attach and activate a .gd or .cs script
+  attach-script ... --no-activate           Attach without _ready() for pre-save assembly
   detach-script <node>                      Remove script from a node
 
 GDSCRIPT EXECUTION
-  eval <code>                               Run GDScript in the live game (single expr auto-returns)
+  eval <code>                               Run GDScript; expressions auto-return, statements do not
 
 INPUT SIMULATION
   click <x> <y> [--button left|right]       Simulate mouse click at coordinates
@@ -743,18 +744,24 @@ program
 
 program
   .command("add-node")
-  .description("Add a new node to the scene tree")
+  .description("Add a node; --script instantiates it before the ready lifecycle")
   .argument("<parent>", "Parent node path")
-  .argument("<type>", "Node class (e.g. Node2D, Sprite2D)")
+  .argument("[type]", "Node class (e.g. Node2D, Sprite2D); optional with --script")
   .option("--name <name>", "Node name")
   .option("--props <json>", "Initial properties as JSON object")
+  .option("--script <path>", "Instantiate from a res:// script so _ready() runs normally")
   .action(
     async (
       parent: string,
-      type: string,
-      opts: { name?: string; props?: string }
+      type: string | undefined,
+      opts: { name?: string; props?: string; script?: string }
     ) => {
-      const params: Record<string, unknown> = { parent, type };
+      if (!type && !opts.script) {
+        throw new Error("Provide a node type, --script, or both");
+      }
+      const params: Record<string, unknown> = { parent };
+      if (type) params.type = type;
+      if (opts.script) params.script = opts.script;
       if (opts.name) params.name = opts.name;
       if (opts.props) params.properties = JSON.parse(opts.props);
       await run("add_node", params);
@@ -804,11 +811,16 @@ program
 
 program
   .command("attach-script")
-  .description("Attach a script to a node")
+  .description("Attach a script and activate its ready lifecycle")
   .argument("<node-path>", "Node path")
   .argument("<script-path>", "Script path (e.g. res://player.gd)")
-  .action(async (nodePath: string, scriptPath: string) => {
-    await run("attach_script", { path: nodePath, script: scriptPath });
+  .option("--no-activate", "Attach without running _ready(), for scenes being assembled before save")
+  .action(async (nodePath: string, scriptPath: string, opts: { activate: boolean }) => {
+    await run("attach_script", {
+      path: nodePath,
+      script: scriptPath,
+      activate: opts.activate,
+    });
   });
 
 program

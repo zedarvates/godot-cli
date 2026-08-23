@@ -15,6 +15,7 @@ let godotProcess = null;
 let client = null;
 let launchToken = null;
 let launchPort = null;
+let godotOutput = "";
 
 async function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -43,7 +44,6 @@ before(async (t) => {
     GODOT_CLI_ALLOW_UNSAFE: "1",
   };
 
-  let godotOutput = "";
   godotProcess = spawn(
     GODOT_BIN,
     ["--path", ADDON_PROJECT_DIR, "--headless", `--godot-cli-port=${launchPort}`],
@@ -164,6 +164,142 @@ test("smoke test: ping and command discovery report live gates", async (t) => {
     catalog.data.commands.find((entry) => entry.name === "fovea_add_splat").security,
     "mutating"
   );
+  assert.equal(
+    catalog.data.commands.find((entry) => entry.name === "add_node").conditionally_unsafe,
+    true
+  );
+});
+
+test("smoke test: add_node from a script runs the node lifecycle", async (t) => {
+  if (!GODOT_BIN) {
+    t.skip("GODOT_BIN not set");
+    return;
+  }
+
+  const added = await client.send("add_node", {
+    parent: "/root/SecurityFixture",
+    script: "res://probe_activation.gd",
+    name: "LiveFromScript",
+  });
+  assert.equal(added.status, "ok", added.error);
+  assert.equal(added.data.script, "res://probe_activation.gd");
+  assert.equal(added.data.physics_processing, true);
+
+  const state = await client.send("eval", {
+    code: "var n = get_node('/root/SecurityFixture/LiveFromScript'); return [n.ready_ran, n.bound != null, n.ticks >= 0]",
+  });
+  assert.deepEqual(state.data, [true, true, true]);
+});
+
+test("smoke test: attach_script activates an in-tree node", async (t) => {
+  if (!GODOT_BIN) {
+    t.skip("GODOT_BIN not set");
+    return;
+  }
+
+  const bare = await client.send("add_node", {
+    parent: "/root/SecurityFixture",
+    type: "Node3D",
+    name: "AttachTarget",
+  });
+  assert.equal(bare.status, "ok", bare.error);
+
+  const attached = await client.send("attach_script", {
+    path: "/root/SecurityFixture/AttachTarget",
+    script: "res://probe_activation.gd",
+  });
+  assert.equal(attached.status, "ok", `${attached.error}\n${godotOutput}`);
+  assert.equal(attached.data.activated, true);
+  assert.equal(attached.data.physics_processing, true);
+
+  const state = await client.send("eval", {
+    code: "var n = get_node('/root/SecurityFixture/AttachTarget'); return [n.ready_ran, n.bound != null]",
+  });
+  assert.deepEqual(state.data, [true, true]);
+});
+
+test("smoke test: attach_script can remain dormant and rejects a base mismatch", async (t) => {
+  if (!GODOT_BIN) {
+    t.skip("GODOT_BIN not set");
+    return;
+  }
+
+  await client.send("add_node", {
+    parent: "/root/SecurityFixture",
+    type: "Node3D",
+    name: "DormantTarget",
+  });
+  const dormant = await client.send("attach_script", {
+    path: "/root/SecurityFixture/DormantTarget",
+    script: "res://probe_activation.gd",
+    activate: false,
+  });
+  assert.equal(dormant.status, "ok", dormant.error);
+  assert.equal(dormant.data.activated, false);
+  assert.equal(dormant.data.physics_processing, false);
+
+  await client.send("add_node", {
+    parent: "/root/SecurityFixture",
+    type: "Node",
+    name: "WrongBase",
+  });
+  const mismatch = await client.send("attach_script", {
+    path: "/root/SecurityFixture/WrongBase",
+    script: "res://probe_activation.gd",
+  });
+  assert.equal(mismatch.status, "error");
+  assert.match(mismatch.error, /Node3D/);
+});
+
+test("smoke test: eval assignment does not emit a speculative parse error", async (t) => {
+  if (!GODOT_BIN) {
+    t.skip("GODOT_BIN not set");
+    return;
+  }
+
+  godotOutput = "";
+  const evaluated = await client.send("eval", {
+    code: "get_node('/root/SecurityFixture/Probe').position = Vector3(4, 5, 6)",
+  });
+  assert.equal(evaluated.status, "ok", evaluated.error);
+  assert.equal(evaluated.form, "statement");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.doesNotMatch(godotOutput, /Assignment is not allowed inside an expression/);
+});
+
+test("smoke test: property assertions reject methods and retain expected values", async (t) => {
+  if (!GODOT_BIN) {
+    t.skip("GODOT_BIN not set");
+    return;
+  }
+
+  const added = await client.send("add_node", {
+    parent: "/root/SecurityFixture",
+    script: "res://probe_activation.gd",
+    name: "PropertyTarget",
+  });
+  assert.equal(added.status, "ok", added.error);
+
+  const method = await client.send("assert", {
+    checks: [{
+      path: "/root/SecurityFixture/PropertyTarget",
+      property: "is_physics_processing",
+      equals: true,
+    }],
+  });
+  assert.equal(method.status, "ok", method.error);
+  assert.equal(method.data.results[0].passed, false);
+  assert.match(method.data.results[0].error, /method, not a property/);
+
+  const variable = await client.send("assert", {
+    checks: [{
+      path: "/root/SecurityFixture/PropertyTarget",
+      property: "plain_var",
+      equals: 42,
+    }],
+  });
+  assert.equal(variable.data.results[0].passed, true);
+  assert.equal(variable.data.results[0].expected, 42);
 });
 
 test("smoke test: optional FoveaCore bridge adds and validates a splat", async (t) => {
@@ -256,4 +392,18 @@ test("smoke test: validate_scene fails closed when exceeding 4096 node budget", 
   );
   assert.notEqual(budgetErr, undefined);
   assert.match(budgetErr.message, /stopped after 4096 nodes/);
+});
+
+test("smoke test: server remains responsive while the game tree is paused", async (t) => {
+  if (!GODOT_BIN) {
+    t.skip("GODOT_BIN not set");
+    return;
+  }
+
+  const paused = await client.send("eval", { code: "get_tree().paused = true" });
+  assert.equal(paused.status, "ok", paused.error);
+  const ping = await client.send("ping", {}, 1000);
+  assert.equal(ping.status, "ok", ping.error);
+  const unpaused = await client.send("eval", { code: "get_tree().paused = false" });
+  assert.equal(unpaused.status, "ok", unpaused.error);
 });
