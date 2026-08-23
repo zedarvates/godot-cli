@@ -525,6 +525,39 @@ export async function runMcpServer(options: { host?: string; port?: string | num
       inputSchema: { type: "object", properties: {} },
     },
     {
+      name: "godot_add_node",
+      description:
+        "Add a node to the scene tree. Pass `script` to instantiate from a GDScript file so the node comes up live -- its _ready() and process callbacks run. Adding a bare node and attaching a script afterwards leaves the node inert, because the ready notification has already passed.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          parent: { type: "string", description: "Parent node path" },
+          type: { type: "string", description: "Node class, e.g. Node3D. Optional when `script` is given" },
+          script: { type: "string", description: "Script to instantiate from (res://...)" },
+          name: { type: "string", description: "Node name" },
+          properties: { type: "object", description: "Properties applied before the node enters the tree" },
+        },
+        required: ["parent"],
+      },
+    },
+    {
+      name: "godot_attach_script",
+      description:
+        "Attach a script to an existing node and run its _ready(), turning on the process callbacks it overrides. Set activate=false when assembling a scene to save: a _ready() that spawns nodes would otherwise bake them into the .tscn.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Target node path" },
+          script: { type: "string", description: "Script path (res://...)" },
+          activate: {
+            type: "boolean",
+            description: "Run _ready() after attaching. Defaults to true",
+          },
+        },
+        required: ["path", "script"],
+      },
+    },
+    {
       name: "godot_commands",
       description:
         "List every command the server accepts and the environment gate each one requires. Use this to discover capability before planning a sequence of calls.",
@@ -628,6 +661,8 @@ export async function runMcpServer(options: { host?: string; port?: string | num
           case "godot_record_metrics": commandName = "record_metrics"; break;
           case "godot_version": commandName = "version"; break;
           case "godot_clear_logs": commandName = "clear_logs"; break;
+          case "godot_add_node": commandName = "add_node"; break;
+          case "godot_attach_script": commandName = "attach_script"; break;
           case "godot_commands": commandName = "commands"; break;
           case "godot_server_info": commandName = "server_info"; break;
           case "godot_inspect_node_children": commandName = "inspect_children"; break;
