@@ -337,6 +337,149 @@ function validateCommonSchema(schema: unknown): void {
   }
 }
 
+function collectSchemaRefs(value: unknown): string[] {
+  const refs: string[] = [];
+  const stack = [value];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (Array.isArray(current)) {
+      stack.push(...current);
+    } else if (isRecord(current)) {
+      if (typeof current.$ref === "string") refs.push(current.$ref);
+      stack.push(...Object.values(current));
+    }
+  }
+  return refs;
+}
+
+function validateFamilySchema(
+  item: VerifiedEntry,
+  catalogResources: Set<string>
+): void {
+  const match = item.resource.match(
+    /^templates\/schemas\/([a-z0-9]+(?:-[a-z0-9]+)*)\/v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\/schema\.json$/
+  );
+  if (match === null) throw new Error(`Strict family schema path is invalid: ${item.resource}`);
+  const [, family, version] = match;
+  if (item.entry.version !== version) {
+    throw new Error(`Strict family schema version disagrees with path: ${item.resource}`);
+  }
+  if (!isRecord(item.value)) throw new Error("Strict family schema must be an object");
+  if (item.value.$schema !== DRAFT_2020_12) {
+    throw new Error("Strict family schema must declare Draft 2020-12");
+  }
+  if (item.value.$id !== `https://ultimateodycer.com/schemas/${family}/${version}`) {
+    throw new Error("Strict family schema $id disagrees with path");
+  }
+  if (item.value.type !== "object") throw new Error("Strict family schema type must be object");
+  for (const reference of collectSchemaRefs(item.value)) {
+    if (reference.startsWith("#")) continue;
+    if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(reference) || reference.startsWith("/")) {
+      throw new Error(`Strict family schema contains remote or absolute $ref: ${reference}`);
+    }
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(reference.split("#", 1)[0]);
+    } catch {
+      throw new Error(`Strict family schema contains malformed $ref: ${reference}`);
+    }
+    if (decoded.includes("\\") || decoded.includes("\0")) {
+      throw new Error(`Strict family schema contains forbidden $ref: ${reference}`);
+    }
+    const resolved = path.posix.normalize(
+      path.posix.join(path.posix.dirname(item.resource), decoded)
+    );
+    if (resolved.startsWith("../") || !catalogResources.has(resolved)) {
+      throw new Error(`Strict family schema $ref is not catalogued: ${reference}`);
+    }
+  }
+}
+
+function jsonEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function validateCompatibility(value: unknown, location: string): boolean {
+  if (!Array.isArray(value) || value.length > 16) {
+    throw new Error(`${location} compatibility must be an array of at most 16 records`);
+  }
+  let godotCompatible = false;
+  for (const [index, record] of value.entries()) {
+    if (!isRecord(record)) throw new Error(`${location}/${index} must be an object`);
+    exactKeys(record, ["consumer", "version", "verified_at", "evidence"], `${location}/${index}`);
+    const consumer = boundedNonEmptyString(record.consumer, `${location}/${index}/consumer`);
+    boundedNonEmptyString(record.version, `${location}/${index}/version`);
+    const verifiedAt = boundedNonEmptyString(record.verified_at, `${location}/${index}/verified_at`);
+    const evidence = boundedNonEmptyString(record.evidence, `${location}/${index}/evidence`);
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(consumer)) {
+      throw new Error(`${location}/${index}/consumer is invalid`);
+    }
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(verifiedAt)) {
+      throw new Error(`${location}/${index}/verified_at must be UTC ISO 8601`);
+    }
+    if (!/^[a-z0-9][a-z0-9\-/:._]*$/.test(evidence)) {
+      throw new Error(`${location}/${index}/evidence is invalid`);
+    }
+    if (consumer === "godot-vr") godotCompatible = true;
+  }
+  return godotCompatible;
+}
+
+function validateStrictTemplate(
+  item: VerifiedEntry,
+  validFamilySchemas: Set<string>
+): boolean {
+  const match = item.resource.match(
+    /^templates\/([a-z0-9]+(?:-[a-z0-9]+)*)\/([a-z0-9]+(?:-[a-z0-9]+)*)\/v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\/template\.json$/
+  );
+  if (match === null) throw new Error(`Strict template path is invalid: ${item.resource}`);
+  const [, family, slug, version] = match;
+  const entry = item.entry;
+  for (const key of ["id", "slug", "family", "schema_file", "spec_checksum"]) {
+    boundedNonEmptyString(entry[key], `${item.resource}/${key}`);
+  }
+  for (const key of ["intended_consumers", "supersedes"]) {
+    if (!Array.isArray(entry[key])) throw new Error(`${item.resource}/${key} must be an array`);
+  }
+  if (
+    entry.version !== version ||
+    entry.family !== family ||
+    entry.slug !== slug ||
+    entry.id !== `${family}:${slug}`
+  ) {
+    throw new Error(`Strict template identity disagrees with path: ${item.resource}`);
+  }
+  if (!validFamilySchemas.has(String(entry.schema_file))) {
+    throw new Error(`Strict template schema_file is not a verified family schema`);
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(String(entry.spec_checksum))) {
+    throw new Error(`Strict template spec_checksum is malformed`);
+  }
+  if (!isRecord(item.value)) throw new Error("Strict template document must be an object");
+  exactKeys(item.value, [...REQUIRED_ENVELOPE_FIELDS], item.resource);
+  if (
+    item.value.contract_version !== "1.0.0" ||
+    item.value.authority !== "declarative" ||
+    item.value.id !== entry.id ||
+    item.value.slug !== slug ||
+    item.value.family !== family ||
+    item.value.version !== version ||
+    item.value.spec_checksum !== entry.spec_checksum
+  ) {
+    throw new Error(`Strict template document metadata disagrees with catalog`);
+  }
+  if (!Array.isArray(item.value.dependencies)) {
+    throw new Error("Strict template dependencies must be an array");
+  }
+  if (!jsonEqual(item.value.intended_consumers, entry.intended_consumers)) {
+    throw new Error("Strict template intended_consumers disagree with catalog");
+  }
+  if (!jsonEqual(item.value.compatibility, entry.compatibility)) {
+    throw new Error("Strict template compatibility disagrees with catalog");
+  }
+  return validateCompatibility(entry.compatibility, `${item.resource}/compatibility`);
+}
+
 export async function inspectTemplateRegistry(
   options: TemplateRegistryInspectionOptions
 ): Promise<TemplateRegistryInspectionReport> {
@@ -445,12 +588,65 @@ export async function inspectTemplateRegistry(
     });
   }
 
+  const catalogResources = new Set(
+    verified.map((item) => item.resource)
+  );
+  let strictFamilySchemas = 0;
+  const validFamilySchemaResources = new Set<string>();
+  for (const item of verified) {
+    if (
+      item.entry.validation_profile !== "strict-schema-v1" ||
+      item.resource === CONTRACT_RESOURCE
+    ) {
+      continue;
+    }
+    try {
+      validateFamilySchema(item, catalogResources);
+      strictFamilySchemas += 1;
+      validFamilySchemaResources.add(item.resource);
+    } catch (error) {
+      findings.push({
+        severity: "error",
+        code: "REGISTRY_SCHEMA_INVALID",
+        location: item.resource,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  let strictTemplates = 0;
+  let godotCompatibleTemplates = 0;
+  for (const item of verified) {
+    if (item.entry.validation_profile !== "strict-v1") continue;
+    try {
+      const compatible = validateStrictTemplate(item, validFamilySchemaResources);
+      strictTemplates += 1;
+      if (compatible) godotCompatibleTemplates += 1;
+    } catch (error) {
+      findings.push({
+        severity: "error",
+        code: "REGISTRY_STRICT_TEMPLATE_INVALID",
+        location: item.resource,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   findings.sort((left, right) =>
     left.code.localeCompare(right.code) ||
     left.location.localeCompare(right.location) ||
     left.message.localeCompare(right.message)
   );
   const integral = findings.every((finding) => finding.severity !== "error");
+  const strictContentReady =
+    integral && strictFamilySchemas > 0 && strictTemplates > 0;
+  const reasons: string[] = [];
+  if (strictFamilySchemas === 0) reasons.push("No strict family schema is catalogued.");
+  if (strictTemplates === 0) reasons.push("No strict-v1 template is catalogued.");
+  if (strictContentReady && godotCompatibleTemplates === 0) {
+    reasons.push("No strict-v1 template has exact godot-vr compatibility evidence.");
+  }
+  const consumerReady = strictContentReady && godotCompatibleTemplates > 0;
 
   return {
     status: integral ? "ok" : "error",
@@ -470,16 +666,13 @@ export async function inspectTemplateRegistry(
       schemaFile: CONTRACT_RESOURCE,
       ready: contractReady && integral,
     },
-    strictFamilySchemas: 0,
-    strictTemplates: 0,
-    godotCompatibleTemplates: 0,
+    strictFamilySchemas,
+    strictTemplates,
+    godotCompatibleTemplates,
     integrityReady: integral,
-    strictContentReady: false,
-    consumerReady: false,
-    reasons: [
-      "No strict family schema is catalogued.",
-      "No strict-v1 template is catalogued.",
-    ],
+    strictContentReady,
+    consumerReady,
+    reasons,
     findings: findings.slice(0, MAX_REGISTRY_FINDINGS),
     boundaries: [BOUNDARY],
   };

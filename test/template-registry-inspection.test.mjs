@@ -133,3 +133,138 @@ test("inspection counts mixed profiles and rejects a referenced checksum change"
     )
   );
 });
+
+test("inspection recognizes an exact strict family schema without content readiness", async (t) => {
+  const root = await createRegistry(t);
+  const resource = "templates/schemas/monsters/v1.0.0/schema.json";
+  const schema = JSON.stringify({
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ultimateodycer.com/schemas/monsters/1.0.0",
+    type: "object",
+    allOf: [
+      { $ref: "../../template-contract/v1.0.0/schema.json" },
+    ],
+    properties: { spec: { type: "object", additionalProperties: false } },
+    additionalProperties: false,
+  });
+  const file = path.join(root, ...resource.split("/"));
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, schema, "utf8");
+  const catalogFile = path.join(root, "templates", "catalog.json");
+  const catalog = JSON.parse(await fs.readFile(catalogFile, "utf8"));
+  catalog.entries.push({
+    name: "monsters",
+    kind: "json-schema",
+    version: "1.0.0",
+    status: "experimental",
+    file: resource,
+    sha256: sha256(schema),
+    compatibility: [],
+    validation_profile: "strict-schema-v1",
+    contract_version: "1.0.0",
+  });
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+
+  const report = await inspectTemplateRegistry({ root });
+
+  assert.equal(report.status, "ok");
+  assert.equal(report.strictFamilySchemas, 1);
+  assert.equal(report.strictContentReady, false);
+  assert.equal(report.consumerReady, false);
+  assert.deepEqual(report.reasons, ["No strict-v1 template is catalogued."]);
+});
+
+test("inspection requires exact compatibility evidence beyond intended consumers", async (t) => {
+  const root = await createRegistry(t);
+  const schemaResource = "templates/schemas/monsters/v1.0.0/schema.json";
+  const familySchema = JSON.stringify({
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ultimateodycer.com/schemas/monsters/1.0.0",
+    type: "object",
+    allOf: [{ $ref: "../../template-contract/v1.0.0/schema.json" }],
+    properties: { spec: { type: "object", additionalProperties: false } },
+    additionalProperties: false,
+  });
+  const schemaFile = path.join(root, ...schemaResource.split("/"));
+  await fs.mkdir(path.dirname(schemaFile), { recursive: true });
+  await fs.writeFile(schemaFile, familySchema, "utf8");
+  const templateResource = "templates/monsters/forest-wolf/v1.0.0/template.json";
+  const specChecksum = `sha256:${"1".repeat(64)}`;
+  const template = JSON.stringify({
+    $schema: "../../../schemas/monsters/v1.0.0/schema.json",
+    contract_version: "1.0.0",
+    id: "monsters:forest-wolf",
+    slug: "forest-wolf",
+    family: "monsters",
+    version: "1.0.0",
+    authority: "declarative",
+    intended_consumers: ["godot-vr"],
+    compatibility: [],
+    dependencies: [],
+    spec_checksum: specChecksum,
+    spec: {},
+  });
+  const templateFile = path.join(root, ...templateResource.split("/"));
+  await fs.mkdir(path.dirname(templateFile), { recursive: true });
+  await fs.writeFile(templateFile, template, "utf8");
+  const catalogFile = path.join(root, "templates", "catalog.json");
+  const catalog = JSON.parse(await fs.readFile(catalogFile, "utf8"));
+  catalog.entries.push(
+    {
+      name: "monsters",
+      kind: "json-schema",
+      version: "1.0.0",
+      status: "experimental",
+      file: schemaResource,
+      sha256: sha256(familySchema),
+      compatibility: [],
+      validation_profile: "strict-schema-v1",
+      contract_version: "1.0.0",
+    },
+    {
+      name: "forest-wolf",
+      kind: "monster-template",
+      version: "1.0.0",
+      status: "experimental",
+      file: templateResource,
+      sha256: sha256(template),
+      compatibility: [],
+      validation_profile: "strict-v1",
+      contract_version: "1.0.0",
+      id: "monsters:forest-wolf",
+      slug: "forest-wolf",
+      family: "monsters",
+      schema_file: schemaResource,
+      spec_checksum: specChecksum,
+      intended_consumers: ["godot-vr"],
+      supersedes: [],
+    }
+  );
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+
+  const intendedOnly = await inspectTemplateRegistry({ root });
+  assert.equal(intendedOnly.status, "ok");
+  assert.equal(intendedOnly.strictContentReady, true);
+  assert.equal(intendedOnly.godotCompatibleTemplates, 0);
+  assert.equal(intendedOnly.consumerReady, false);
+
+  const compatibility = {
+    consumer: "godot-vr",
+    version: "1.0.0",
+    verified_at: "2026-08-23T00:00:00Z",
+    evidence: "tests/template-registry/commit-abcdef1",
+  };
+  const compatibleTemplate = JSON.stringify({
+    ...JSON.parse(template),
+    compatibility: [compatibility],
+  });
+  await fs.writeFile(templateFile, compatibleTemplate, "utf8");
+  catalog.entries.at(-1).compatibility = [compatibility];
+  catalog.entries.at(-1).sha256 = sha256(compatibleTemplate);
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+  const compatible = await inspectTemplateRegistry({ root });
+  assert.equal(compatible.status, "ok");
+  assert.equal(compatible.godotCompatibleTemplates, 1);
+  assert.equal(compatible.consumerReady, true);
+  assert.deepEqual(compatible.reasons, []);
+});
