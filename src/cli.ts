@@ -29,6 +29,7 @@ import {
   type RuntimeMode,
 } from "./runtime.js";
 import { validateSceneFile } from "./scene-validation.js";
+import { inspectTemplateRegistry } from "./template-registry-inspection.js";
 import { listTestProfiles, runTestProfile } from "./test-runner.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -498,6 +499,32 @@ sceneCommands
       }
     }
   );
+
+// ---------------------------------------------------------------------------
+// Local template registry inspection (read-only, no schema execution)
+// ---------------------------------------------------------------------------
+
+const templateCommands = program
+  .command("template")
+  .description("Inspect versioned Ultimate Odycer template contracts");
+
+const templateRegistryCommands = templateCommands
+  .command("registry")
+  .description("Inspect a local JSON template registry without executing it");
+
+templateRegistryCommands
+  .command("inspect")
+  .description("Verify catalog, profiles, schemas, checksums, and readiness")
+  .argument("<root>", "Explicit local registry root")
+  .action(async (root: string) => {
+    try {
+      const report = await inspectTemplateRegistry({ root });
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // Project-defined, bounded test profiles

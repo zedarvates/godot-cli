@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -125,6 +126,60 @@ config/name="Package Consumer Test"
 `;
   const projectFile = path.join(project, "project.godot");
   await fs.writeFile(projectFile, projectDefinition, "utf8");
+
+  const registry = path.join(temporaryRoot, "template-registry");
+  const schemaResource =
+    "templates/schemas/template-contract/v1.0.0/schema.json";
+  const schema = JSON.stringify({
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ultimateodycer.com/schemas/template-contract/1.0.0",
+    type: "object",
+    required: [
+      "$schema", "contract_version", "id", "slug", "family", "version",
+      "authority", "intended_consumers", "compatibility", "dependencies",
+      "spec_checksum", "spec",
+    ],
+    properties: {},
+    additionalProperties: false,
+  });
+  const schemaFile = path.join(registry, ...schemaResource.split("/"));
+  await fs.mkdir(path.dirname(schemaFile), { recursive: true });
+  await fs.writeFile(schemaFile, schema, "utf8");
+  const catalogFile = path.join(registry, "templates", "catalog.json");
+  await fs.mkdir(path.dirname(catalogFile), { recursive: true });
+  await fs.writeFile(
+    catalogFile,
+    JSON.stringify({
+      registry_version: "2.0.0",
+      generated_at: "2026-08-23",
+      source_set: "package-consumer",
+      entries: [
+        {
+          name: "template-contract",
+          kind: "json-schema",
+          version: "1.0.0",
+          status: "experimental",
+          file: schemaResource,
+          sha256: createHash("sha256").update(schema).digest("hex"),
+          compatibility: [],
+          validation_profile: "strict-schema-v1",
+          contract_version: "1.0.0",
+        },
+      ],
+      aliases: [],
+    }),
+    "utf8"
+  );
+  const registryReport = JSON.parse(
+    runInstalledCli(
+      cliPath,
+      ["template", "registry", "inspect", registry],
+      consumer
+    )
+  );
+  assert.equal(registryReport.status, "ok");
+  assert.equal(registryReport.complete, true);
+  assert.equal(registryReport.consumerReady, false);
 
   const before = JSON.parse(
     runInstalledCli(cliPath, ["addon", "status", project], consumer)
