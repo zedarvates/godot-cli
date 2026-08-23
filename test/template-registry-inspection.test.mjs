@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -24,6 +25,23 @@ const REQUIRED_ENVELOPE_FIELDS = [
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function runCli(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["dist/cli.js", ...args], {
+      cwd: new URL("..", import.meta.url),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
+    child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
+    child.once("error", reject);
+    child.once("exit", (code) => resolve({ code, stdout, stderr }));
+  });
 }
 
 async function createRegistry(context) {
@@ -267,4 +285,17 @@ test("inspection requires exact compatibility evidence beyond intended consumers
   assert.equal(compatible.godotCompatibleTemplates, 1);
   assert.equal(compatible.consumerReady, true);
   assert.deepEqual(compatible.reasons, []);
+});
+
+test("template registry inspect CLI emits a complete false-readiness JSON report", async (t) => {
+  const root = await createRegistry(t);
+
+  const result = await runCli(["template", "registry", "inspect", root]);
+
+  assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stderr, "");
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.status, "ok");
+  assert.equal(report.complete, true);
+  assert.equal(report.consumerReady, false);
 });
