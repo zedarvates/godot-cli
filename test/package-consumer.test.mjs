@@ -118,6 +118,42 @@ test("packed CLI installs and manages its addon outside the source tree", async 
     sourceManifest.version
   );
 
+  const addonManifestFile = path.join(temporaryRoot, "addon-manifest.json");
+  const addonManifestBytes = Buffer.from(JSON.stringify({
+    schema_version: 1,
+    id: "addon_package_consumer",
+    name: "Package Consumer Addon",
+    version: "1.0.0",
+    engine_api: "2.1",
+    publisher: "Ultimate Odycer Test",
+    package_sha256: "0123456789abcdef".repeat(4),
+    signature_status: "pending",
+    signature: {
+      algorithm: "ed25519",
+      publisher_key_id: "uo.test.primary",
+      value_base64: `${"A".repeat(86)}==`,
+    },
+    status: "registered",
+    permissions: [],
+    capabilities: ["world.read"],
+    cpu_budget_ms: 4.5,
+    memory_budget_mb: 128,
+  }));
+  await fs.writeFile(addonManifestFile, addonManifestBytes);
+  const modReport = JSON.parse(
+    runInstalledCli(
+      cliPath,
+      ["mod", "manifest", "inspect", addonManifestFile],
+      consumer
+    )
+  );
+  assert.equal(modReport.status, "ok");
+  assert.equal(modReport.trustVerdict, "not_checked");
+  assert.equal(modReport.packageIntegrity, "not_checked");
+  assert.equal(modReport.activationEligible, false);
+  assert.equal(modReport.serverAuthorityRequired, true);
+  assert.deepEqual(await fs.readFile(addonManifestFile), addonManifestBytes);
+
   const projectDefinition = `config_version=5
 
 [application]

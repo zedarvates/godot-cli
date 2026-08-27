@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -44,6 +45,24 @@ function hasFinding(report, code, location) {
   return report.findings.some(
     (finding) => finding.code === code && (location === undefined || finding.location === location),
   );
+}
+
+function runCli(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.resolve("dist/cli.js"), ...args], {
+      cwd: path.resolve("."),
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+  });
 }
 
 test("registered pending manifest is structurally valid but never trusted", async () => {
@@ -279,3 +298,44 @@ test("unknown fields and duplicate signed tokens are deterministic warnings", as
     "package_sha256", "permissions", "capabilities", "cpu_budget_ms", "memory_budget_mb",
   ]);
 });
+
+test("mod manifest inspect CLI returns JSON and preserves the source", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uo-mod-cli-"));
+  try {
+    const manifestFile = path.join(root, "addon.json");
+    const original = Buffer.from(JSON.stringify(validManifest()), "utf8");
+    await writeFile(manifestFile, original);
+    const result = await runCli(["mod", "manifest", "inspect", manifestFile]);
+    assert.equal(result.code, 0);
+    assert.equal(result.stderr, "");
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.status, "ok");
+    assert.equal(report.trustVerdict, "not_checked");
+    assert.equal(report.activationEligible, false);
+    assert.deepEqual(await readFileForTest(manifestFile), original);
+
+    const invalid = validManifest();
+    invalid.cpu_budget_ms = 500;
+    await writeFile(manifestFile, JSON.stringify(invalid), "utf8");
+    const failed = await runCli(["mod", "manifest", "inspect", manifestFile]);
+    assert.equal(failed.code, 1);
+    assert.equal(failed.stderr, "");
+    assert.equal(JSON.parse(failed.stdout).status, "error");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("mod manifest exposes inspect only", async () => {
+  const help = await runCli(["mod", "manifest", "--help"]);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /inspect/);
+  for (const forbidden of ["install", "activate", "rollback", "migrate"]) {
+    const result = await runCli(["mod", "manifest", forbidden]);
+    assert.notEqual(result.code, 0, forbidden);
+  }
+});
+
+async function readFileForTest(file) {
+  return import("node:fs/promises").then(({ readFile }) => readFile(file));
+}
