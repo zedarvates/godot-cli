@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
 
 export const MAX_MOD_MANIFEST_BYTES = 256 * 1024;
@@ -161,6 +161,34 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+async function readBoundedRegularFile(
+  file: string,
+): Promise<{ bytes: Buffer; statSize: number }> {
+  const handle = await open(file, "r");
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error("manifest is not a regular file");
+    if (stat.size > MAX_MOD_MANIFEST_BYTES) throw new Error("manifest exceeds 256 KiB");
+
+    const buffer = Buffer.allocUnsafe(MAX_MOD_MANIFEST_BYTES + 1);
+    let total = 0;
+    while (total <= MAX_MOD_MANIFEST_BYTES) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        total,
+        buffer.length - total,
+        null,
+      );
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total > MAX_MOD_MANIFEST_BYTES) throw new Error("manifest exceeds 256 KiB");
+    return { bytes: Buffer.from(buffer.subarray(0, total)), statSize: stat.size };
+  } finally {
+    await handle.close();
+  }
+}
+
 function comparablePath(value: string): string {
   const resolved = path.resolve(value);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
@@ -284,7 +312,10 @@ function validateJsonBounds(value: unknown, findings: ModFinding[]): boolean {
       valid = false;
       continue;
     }
-    if (typeof item.value === "string" && Buffer.byteLength(item.value, "utf8") > MAX_MOD_JSON_STRING_BYTES) {
+    if (typeof item.value === "number" && !Number.isFinite(item.value)) {
+      addFinding(findings, "error", "MOD_JSON_INVALID", item.location || "/", "JSON number is outside the finite numeric domain");
+      valid = false;
+    } else if (typeof item.value === "string" && Buffer.byteLength(item.value, "utf8") > MAX_MOD_JSON_STRING_BYTES) {
       addFinding(findings, "error", "MOD_JSON_LIMIT", item.location || "/", "JSON string exceeds 4096 UTF-8 bytes");
       valid = false;
     } else if (Array.isArray(item.value)) {
@@ -353,13 +384,9 @@ function validateOptionalNonNegativeInteger(object: JsonObject, field: string, f
 }
 
 function validateManifest(object: JsonObject, report: ModManifestInspectionReport, findings: ModFinding[]): void {
-  for (const field of REQUIRED_ROOT_FIELDS) {
-    if (!(field in object)) {
-      addFinding(findings, "error", "MOD_FIELD_REQUIRED", `/${field}`, `${field} is required`);
-    }
-  }
-
-  if (object.schema_version !== 1) {
+  if (!("schema_version" in object)) {
+    addFinding(findings, "error", "MOD_FIELD_REQUIRED", "/schema_version", "schema_version is required");
+  } else if (object.schema_version !== 1) {
     addFinding(findings, "error", "MOD_FIELD_INVALID", "/schema_version", "schema_version must be the integer 1");
   }
 
@@ -410,8 +437,10 @@ function validateManifest(object: JsonObject, report: ModManifestInspectionRepor
   }
 
   const signature = object.signature;
-  if (!isObject(signature)) {
-    if ("signature" in object) addFinding(findings, "error", "MOD_SIGNATURE_ENVELOPE_INVALID", "/signature", "signature must be an object");
+  if (!("signature" in object)) {
+    addFinding(findings, "error", "MOD_FIELD_REQUIRED", "/signature", "signature is required");
+  } else if (!isObject(signature)) {
+    addFinding(findings, "error", "MOD_SIGNATURE_ENVELOPE_INVALID", "/signature", "signature must be an object");
   } else {
     const algorithm = requiredSignatureString(signature, "algorithm", 16, findings);
     const keyId = requiredSignatureString(signature, "publisher_key_id", 96, findings);
@@ -437,13 +466,13 @@ function validateManifest(object: JsonObject, report: ModManifestInspectionRepor
 
   const cpu = object.cpu_budget_ms;
   if (!("cpu_budget_ms" in object)) {
-    // Already reported by the required-field pass.
+    addFinding(findings, "error", "MOD_FIELD_REQUIRED", "/cpu_budget_ms", "cpu_budget_ms is required");
   } else if (typeof cpu !== "number" || !Number.isFinite(cpu) || cpu <= 0 || cpu > 50) {
     addFinding(findings, "error", "MOD_BUDGET_INVALID", "/cpu_budget_ms", "cpu_budget_ms must be finite and in (0, 50]");
   }
   const memory = object.memory_budget_mb;
   if (!("memory_budget_mb" in object)) {
-    // Already reported by the required-field pass.
+    addFinding(findings, "error", "MOD_FIELD_REQUIRED", "/memory_budget_mb", "memory_budget_mb is required");
   } else if (typeof memory !== "number" || !Number.isInteger(memory) || memory < 1 || memory > 4096) {
     addFinding(findings, "error", "MOD_BUDGET_INVALID", "/memory_budget_mb", "memory_budget_mb must be an integer in [1, 4096]");
   }
@@ -513,9 +542,10 @@ export async function inspectModManifest(
       report.findings = findings;
       return report;
     }
-    initialBytes = await readFile(canonical);
+    const boundedRead = await readBoundedRegularFile(canonical);
+    initialBytes = boundedRead.bytes;
     initialSize = initialStat.size;
-    if (initialBytes.byteLength !== initialSize || initialBytes.byteLength > MAX_MOD_MANIFEST_BYTES) {
+    if (boundedRead.statSize !== initialSize || initialBytes.byteLength !== initialSize) {
       addFinding(findings, "error", "MOD_SOURCE_CHANGED", "/", "manifest changed while it was being read");
       report.findings = findings;
       return report;
@@ -549,10 +579,12 @@ export async function inspectModManifest(
 
   try {
     const finalStat = await lstat(canonical);
-    const finalBytes = await readFile(canonical);
+    const finalRead = await readBoundedRegularFile(canonical);
+    const finalBytes = finalRead.bytes;
     const unchanged =
       finalStat.isFile() &&
       !finalStat.isSymbolicLink() &&
+      finalRead.statSize === finalStat.size &&
       finalStat.size === initialSize &&
       finalBytes.byteLength === initialBytes.byteLength &&
       sha256(finalBytes) === initialHash;
@@ -566,10 +598,11 @@ export async function inspectModManifest(
 
   const findingOverflow = findings.length > MAX_MOD_FINDINGS;
   if (findingOverflow) {
-    findings.length = MAX_MOD_FINDINGS;
+    sortFindings(findings);
+    findings.length = MAX_MOD_FINDINGS - 1;
     addFinding(findings, "error", "MOD_FINDINGS_TRUNCATED", "/", "finding limit reached");
   }
-  report.findings = sortFindings(findings).slice(0, MAX_MOD_FINDINGS);
+  report.findings = sortFindings(findings);
   report.complete = !findingOverflow && report.integrity.unchanged;
   report.structurallyValid = report.complete && !report.findings.some((finding) => finding.severity === "error");
   report.status = report.structurallyValid ? "ok" : "error";

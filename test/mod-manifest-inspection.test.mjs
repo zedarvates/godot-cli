@@ -176,6 +176,11 @@ test("reports every required addon-manifest v1 field", async () => {
     delete fixture[field];
     const report = await inspectFixture(fixture);
     assert.equal(hasFinding(report, "MOD_FIELD_REQUIRED", `/${field}`), true, field);
+    assert.equal(
+      report.findings.filter((finding) => finding.location === `/${field}`).length,
+      1,
+      `${field} should produce one focused finding`,
+    );
     assert.equal(report.structurallyValid, false);
   }
 });
@@ -254,6 +259,75 @@ test("validates signature envelope shape without checking trust", async () => {
   }
 });
 
+test("rejects missing signature members with envelope-specific findings", async () => {
+  for (const field of ["algorithm", "publisher_key_id", "value_base64"]) {
+    const fixture = validManifest();
+    delete fixture.signature[field];
+    const report = await inspectFixture(fixture);
+    assert.equal(
+      hasFinding(report, "MOD_SIGNATURE_ENVELOPE_INVALID", `/signature/${field}`),
+      true,
+      field,
+    );
+  }
+});
+
+test("validates optional registry metadata without claiming lifecycle authority", async () => {
+  const valid = validManifest();
+  Object.assign(valid, {
+    package_status: "missing",
+    package_reason: "awaiting/package",
+    signature_reason: "queued:trust-check",
+    package_size_bytes: 0,
+    package_entry_count: 12,
+    package_uncompressed_bytes: 4096,
+    registered_at: 0,
+    updated_at: 1,
+    signature_checked_at: 2,
+    package_checked_at: 3,
+  });
+  assert.equal((await inspectFixture(valid)).structurallyValid, true);
+
+  for (const field of [
+    "package_size_bytes", "package_entry_count", "package_uncompressed_bytes",
+    "registered_at", "updated_at", "signature_checked_at", "package_checked_at",
+  ]) {
+    const fixture = validManifest();
+    fixture[field] = -1;
+    assert.equal(hasFinding(await inspectFixture(fixture), "MOD_FIELD_INVALID", `/${field}`), true, field);
+  }
+  for (const field of ["package_reason", "signature_reason"]) {
+    const fixture = validManifest();
+    fixture[field] = "unsafe reason";
+    assert.equal(hasFinding(await inspectFixture(fixture), "MOD_TOKEN_INVALID", `/${field}`), true, field);
+  }
+});
+
+test("accepts only declared mutable status enums", async () => {
+  for (const [field, values] of [
+    ["status", ["registered", "disabled"]],
+    ["signature_status", ["pending", "verified", "rejected"]],
+    ["package_status", ["missing", "admitted", "rejected"]],
+  ]) {
+    for (const value of values) {
+      const fixture = validManifest();
+      fixture[field] = value;
+      assert.equal((await inspectFixture(fixture)).structurallyValid, true, `${field}=${value}`);
+    }
+    const invalid = validManifest();
+    invalid[field] = "future";
+    assert.equal(hasFinding(await inspectFixture(invalid), "MOD_FIELD_INVALID", `/${field}`), true, field);
+  }
+});
+
+test("rejects non-finite JSON numbers produced by exponent overflow", async () => {
+  const report = await inspectFixture(null, (file) =>
+    writeFile(file, `${JSON.stringify(validManifest()).slice(0, -1)},"future":1e400}`, "utf8")
+  );
+  assert.equal(hasFinding(report, "MOD_JSON_INVALID", "/future"), true);
+  assert.equal(report.structurallyValid, false);
+});
+
 test("enforces active state structure while preserving server authority", async () => {
   const pending = validManifest();
   pending.status = "active";
@@ -297,6 +371,17 @@ test("unknown fields and duplicate signed tokens are deterministic warnings", as
     "schema_version", "id", "name", "version", "engine_api", "publisher",
     "package_sha256", "permissions", "capabilities", "cpu_budget_ms", "memory_budget_mb",
   ]);
+});
+
+test("finding overflow is fail-closed and retains the truncation marker", async () => {
+  const fixture = validManifest();
+  for (let index = 0; index < 140; index += 1) fixture[`future_${index}`] = index;
+  const report = await inspectFixture(fixture);
+  assert.equal(report.status, "error");
+  assert.equal(report.complete, false);
+  assert.equal(report.structurallyValid, false);
+  assert.equal(report.findings.length, 128);
+  assert.equal(hasFinding(report, "MOD_FINDINGS_TRUNCATED", "/"), true);
 });
 
 test("mod manifest inspect CLI returns JSON and preserves the source", async () => {

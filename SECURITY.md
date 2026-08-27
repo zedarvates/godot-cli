@@ -191,6 +191,11 @@ their input order. Unknown root/signature fields and duplicate signed tokens
 are warnings because Zig's generic parser accepts unknown fields; warnings are
 not evidence of compatibility or trust.
 
+Duplicate JSON object-member occurrences cannot be proven after parser
+normalization; the report makes no object-key uniqueness claim. Producers that
+require this stricter property must reject duplicates before emitting a
+manifest.
+
 ## Remaining limitations
 
 The automated suite includes Node protocol controls, source invariants, real
