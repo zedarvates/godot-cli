@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `mod manifest inspect <manifest.json>` for bounded local structural checks of
+  the Zig2 addon-manifest schema v1, including byte-integrity evidence and
+  deterministic findings.
+- Optional test-only parity gates for the authoritative Zig manifest and trust
+  store suites when `UO_ZIG_SERVER_ROOT` is explicitly configured.
+
+### Security
+
+- Mod inspection always reports trust and package integrity as `not_checked`,
+  activation as ineligible, and Zig2 authority as required. It does not read
+  packages or trust stores, verify signatures, execute mods, or mutate their
+  lifecycle.
+
 All notable changes to this fork are documented here. The project uses
 pre-release versions until the public API and operational boundary are stable.
 
