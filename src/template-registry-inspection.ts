@@ -401,7 +401,12 @@ function validateFamilySchema(
     throw new Error("Strict family schema $id disagrees with path");
   }
   const references = collectSchemaRefs(item.value);
-  if (item.value.type !== "object" && !references.includes(CONTRACT_SCHEMA_ID)) {
+  const composesCommonContract =
+    Array.isArray(item.value.allOf) &&
+    item.value.allOf.some(
+      (member) => isRecord(member) && member.$ref === CONTRACT_SCHEMA_ID,
+    );
+  if (item.value.type !== "object" && !composesCommonContract) {
     throw new Error("Strict family schema must be an object or compose the common contract");
   }
   for (const reference of references) {

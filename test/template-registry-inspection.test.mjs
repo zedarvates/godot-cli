@@ -234,6 +234,47 @@ test("inspection accepts a family schema composed from the exact common contract
   assert.equal(report.consumerReady, false);
 });
 
+test("inspection rejects a nested common-contract ref that does not compose the family root", async (t) => {
+  const root = await createRegistry(t);
+  const resource = "templates/schemas/classes/v1.0.0/schema.json";
+  const schema = JSON.stringify({
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ultimateodycer.com/schemas/classes/1.0.0",
+    properties: {
+      decoy: {
+        $ref: "https://ultimateodycer.com/schemas/template-contract/1.0.0",
+      },
+    },
+  });
+  const file = path.join(root, ...resource.split("/"));
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, schema, "utf8");
+  const catalogFile = path.join(root, "templates", "catalog.json");
+  const catalog = JSON.parse(await fs.readFile(catalogFile, "utf8"));
+  catalog.entries.push({
+    name: "classes",
+    kind: "json-schema",
+    version: "1.0.0",
+    status: "experimental",
+    file: resource,
+    sha256: sha256(schema),
+    compatibility: [],
+    validation_profile: "strict-schema-v1",
+    contract_version: "1.0.0",
+  });
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+
+  const report = await inspectTemplateRegistry({ root });
+
+  assert.equal(report.status, "error");
+  assert.equal(report.strictFamilySchemas, 0);
+  assert.ok(
+    report.findings.some(
+      (finding) => finding.code === "REGISTRY_SCHEMA_INVALID",
+    ),
+  );
+});
+
 test("inspection accepts an exact reciprocal strict-to-legacy supersession", async (t) => {
   const root = await createRegistry(t);
   const schemaResource = "templates/schemas/monsters/v1.0.0/schema.json";
