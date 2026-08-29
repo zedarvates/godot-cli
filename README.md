@@ -35,6 +35,7 @@ The executable is named **`uo-godot-cli`** to avoid colliding with the unrelated
 |---|---|---:|---:|
 | Audit a project before touching it | `project preflight` | No | No |
 | Compare CLI and `godot_ai` capabilities | `project compatibility` | No | Only with `--live` |
+| Inspect one addon-manifest v1 file | `mod manifest inspect` | No | No |
 | Start and own one local runtime | `runtime start` | Yes | Yes |
 | Prove one scene and stop cleanly | `scene validate` | Yes | Yes |
 | Run an allowlisted project test | `test list`, then `test run` | Runner-dependent | No runtime token |
@@ -207,6 +208,24 @@ shared family is not a claim that both control planes are behaviorally identical
 `godot-ai` identity, reads the authenticated CLI command gates, and lists the
 MCP tools with bounded JSON/SSE pagination. It never enables a gate or invokes
 an MCP tool.
+
+### Mod manifest structural inspection
+
+```bash
+uo-godot-cli mod manifest inspect /path/to/addon-manifest.json
+```
+
+The command reads one explicit regular `.json` file (maximum 256 KiB), rejects
+symbolic paths and invalid UTF-8, applies bounded JSON traversal, and mirrors
+the structural fields, SemVer, token, budget, signature-envelope, and mutable
+state rules of Zig2 `addon-manifest` schema v1. Unknown fields and duplicate
+signed tokens are deterministic warnings; signed array order is preserved.
+
+Every report deliberately returns `trustVerdict: "not_checked"`,
+`packageIntegrity: "not_checked"`, `activationEligible: false`, and
+`serverAuthorityRequired: true`. The command does not read a mod package or
+trust store, verify Ed25519, install, activate, migrate, roll back, sandbox, or
+execute mod code. Only `zig-server-v2` can establish trust and lifecycle state.
 
 ### Managed runtime
 

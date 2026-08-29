@@ -190,6 +190,34 @@ project-defined test entry.
   not a project-wide write audit: test code may create `.godot`, `bin`, `obj`,
   reports, screenshots, or other declared test artifacts.
 
+## Mod manifest inspection boundary
+
+`uo-godot-cli mod manifest inspect <manifest.json>` is a local, read-only
+structural mirror of the Zig2 addon-manifest schema v1. It requires one explicit
+regular `.json` file, rejects symbolic filesystem aliases, limits input to
+256 KiB, decodes UTF-8 fatally, and fingerprints the bytes before and after
+inspection. JSON depth, arrays, strings, visited values, and findings are
+bounded; incomplete inspection fails closed.
+
+The signature check covers only the Ed25519 envelope shape. The command never
+loads a publisher trust store, verifies cryptographic trust, reads or hashes a
+package, connects to a server, starts a child process, or executes mod code.
+It exposes no install, activate, migrate, rollback, sandbox, or lifecycle
+operation. Consequently every report fixes trust and package integrity to
+`not_checked`, activation eligibility to `false`, and server authority to
+`true`, even for an active/verified/admitted structure.
+
+The eleven signed claim names are reported for auditability, but the CLI does
+not serialize or hash a signing payload. Permissions and capabilities preserve
+their input order. Unknown root/signature fields and duplicate signed tokens
+are warnings because Zig's generic parser accepts unknown fields; warnings are
+not evidence of compatibility or trust.
+
+Duplicate JSON object-member occurrences cannot be proven after parser
+normalization; the report makes no object-key uniqueness claim. Producers that
+require this stricter property must reject duplicates before emitting a
+manifest.
+
 ## Remaining limitations
 
 The automated suite includes Node protocol controls, source invariants, real

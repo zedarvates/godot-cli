@@ -31,6 +31,7 @@ import {
 import { validateSceneFile } from "./scene-validation.js";
 import { inspectTemplateRegistry } from "./template-registry-inspection.js";
 import { listTestProfiles, runTestProfile } from "./test-runner.js";
+import { inspectModManifest } from "./mod-manifest-inspection.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -124,6 +125,9 @@ SCENE FILE VALIDATION (managed, safe-mode, no save)
 PROJECT TEST PROFILES (local manifest; no shell)
   test list [project]                       List declared profiles and availability
   test run <profile> [project]              Run one bounded, allowlisted profile
+
+MOD MANIFEST (local structural inspection only)
+  mod manifest inspect <manifest.json>      Check addon-manifest v1 without trust or activation
 
 COMPATIBILITY
   ping                                      Probe authenticated engine readiness once
@@ -248,6 +252,32 @@ async function runDoctor(options: { allowElevated?: boolean }): Promise<void> {
     reportLocalError(error);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Mod manifest inspection (local, read-only, no trust or activation)
+// ---------------------------------------------------------------------------
+
+const modCommands = program
+  .command("mod")
+  .description("Inspect Ultimate Odycer mod contracts without executing them");
+
+const modManifestCommands = modCommands
+  .command("manifest")
+  .description("Inspect local addon-manifest v1 structure");
+
+modManifestCommands
+  .command("inspect")
+  .description("Preflight one manifest without trust or activation")
+  .argument("<manifest>", "Explicit local .json manifest file")
+  .action(async (manifest: string) => {
+    try {
+      const report = await inspectModManifest({ manifest });
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // Project discovery and preflight (local filesystem only; read-only)
