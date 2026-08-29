@@ -1,5 +1,5 @@
 {
-  "name": "godot-cli",
+  "name": "@zedarvates/godot-cli",
   "version": "0.4.0",
   "description": "CLI tool for controlling Godot game engine - like Playwright, but for games",
   "type": "module",
@@ -10,8 +10,34 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "npm run build && node --test dist/tests/*.test.js"
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "prepack": "npm run build"
   },
+  "files": [
+    "dist",
+    "godot-addon",
+    "README.md",
+    "docs"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zedarvates/godot-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zedarvates/godot-cli/issues"
+  },
+  "homepage": "https://github.com/zedarvates/godot-cli#readme",
+  "keywords": [
+    "godot",
+    "cli",
+    "mcp",
+    "ai-agents",
+    "game-development",
+    "testing"
+  ],
   "dependencies": {
     "commander": "^13.1.0"
   },
