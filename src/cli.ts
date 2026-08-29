@@ -30,7 +30,9 @@ import {
 } from "./runtime.js";
 import { validateSceneFile } from "./scene-validation.js";
 import { validateAsset } from "./asset-validation.js";
+import { inspectTemplateRegistry } from "./template-registry-inspection.js";
 import { listTestProfiles, runTestProfile } from "./test-runner.js";
+import { inspectModManifest } from "./mod-manifest-inspection.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -121,9 +123,18 @@ MANAGED RUNTIME (token required; exact addon/autoload required for start)
 SCENE FILE VALIDATION (managed, safe-mode, no save)
   scene validate <scene> [--project PATH]   Load, inspect logs, validate and stop
 
+ASSET VALIDATION (local, read-only; optional isolated Godot import)
+  asset validate <asset> [--project PATH]   Check one project-local .gltf or .glb
+
+TEMPLATE REGISTRY (local, read-only; no schema execution)
+  template registry inspect <root>          Check catalog, schemas, checksums and readiness
+
 PROJECT TEST PROFILES (local manifest; no shell)
   test list [project]                       List declared profiles and availability
   test run <profile> [project]              Run one bounded, allowlisted profile
+
+MOD MANIFEST (local structural inspection only)
+  mod manifest inspect <manifest.json>      Check addon-manifest v1 without trust or activation
 
 COMPATIBILITY
   ping                                      Probe authenticated engine readiness once
@@ -139,7 +150,7 @@ SCENE TREE
 NODE OPERATIONS
   get-node <path>                           Get ALL properties of a node
   set-property <path> <prop> <value>        Set a property (supports Vector2, Color, etc.)
-  add-node <parent> <type> [--name N]       Create a node (e.g. Node2D, Sprite2D)
+  add-node <parent> [type] [--script PATH]  Create a live node; scripted creation runs _ready()
   remove-node <path>                        Remove a node from the tree
   rename-node <path> <name>                 Rename a node
   reparent-node <path> <new-parent>         Move a node to a new parent
@@ -151,11 +162,12 @@ OPTIONAL FOVEACORE
   fovea validate                            Validate every FoveaSplat3D source and setting
 
 SCRIPTS
-  attach-script <node> <script>             Attach a .gd or .cs script to a node
+  attach-script <node> <script>             Attach and activate a .gd or .cs script
+  attach-script ... --no-activate           Attach without _ready() for pre-save assembly
   detach-script <node>                      Remove script from a node
 
 GDSCRIPT EXECUTION
-  eval <code>                               Run GDScript in the live game (single expr auto-returns)
+  eval <code>                               Run GDScript; expressions auto-return, statements do not
 
 INPUT SIMULATION
   click <x> <y> [--button left|right]       Simulate mouse click at coordinates
@@ -247,6 +259,32 @@ async function runDoctor(options: { allowElevated?: boolean }): Promise<void> {
     reportLocalError(error);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Mod manifest inspection (local, read-only, no trust or activation)
+// ---------------------------------------------------------------------------
+
+const modCommands = program
+  .command("mod")
+  .description("Inspect Ultimate Odycer mod contracts without executing them");
+
+const modManifestCommands = modCommands
+  .command("manifest")
+  .description("Inspect local addon-manifest v1 structure");
+
+modManifestCommands
+  .command("inspect")
+  .description("Preflight one manifest without trust or activation")
+  .argument("<manifest>", "Explicit local .json manifest file")
+  .action(async (manifest: string) => {
+    try {
+      const report = await inspectModManifest({ manifest });
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // Project discovery and preflight (local filesystem only; read-only)
@@ -551,6 +589,32 @@ assetCommands
   );
 
 // ---------------------------------------------------------------------------
+// Local template registry inspection (read-only, no schema execution)
+// ---------------------------------------------------------------------------
+
+const templateCommands = program
+  .command("template")
+  .description("Inspect versioned Ultimate Odycer template contracts");
+
+const templateRegistryCommands = templateCommands
+  .command("registry")
+  .description("Inspect a local JSON template registry without executing it");
+
+templateRegistryCommands
+  .command("inspect")
+  .description("Verify catalog, profiles, schemas, checksums, and readiness")
+  .argument("<root>", "Explicit local registry root")
+  .action(async (root: string) => {
+    try {
+      const report = await inspectTemplateRegistry({ root });
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+// ---------------------------------------------------------------------------
 // Project-defined, bounded test profiles
 // ---------------------------------------------------------------------------
 
@@ -795,18 +859,24 @@ program
 
 program
   .command("add-node")
-  .description("Add a new node to the scene tree")
+  .description("Add a node; --script instantiates it before the ready lifecycle")
   .argument("<parent>", "Parent node path")
-  .argument("<type>", "Node class (e.g. Node2D, Sprite2D)")
+  .argument("[type]", "Node class (e.g. Node2D, Sprite2D); optional with --script")
   .option("--name <name>", "Node name")
   .option("--props <json>", "Initial properties as JSON object")
+  .option("--script <path>", "Instantiate from a res:// script so _ready() runs normally")
   .action(
     async (
       parent: string,
-      type: string,
-      opts: { name?: string; props?: string }
+      type: string | undefined,
+      opts: { name?: string; props?: string; script?: string }
     ) => {
-      const params: Record<string, unknown> = { parent, type };
+      if (!type && !opts.script) {
+        throw new Error("Provide a node type, --script, or both");
+      }
+      const params: Record<string, unknown> = { parent };
+      if (type) params.type = type;
+      if (opts.script) params.script = opts.script;
       if (opts.name) params.name = opts.name;
       if (opts.props) params.properties = JSON.parse(opts.props);
       await run("add_node", params);
@@ -856,11 +926,16 @@ program
 
 program
   .command("attach-script")
-  .description("Attach a script to a node")
+  .description("Attach a script and activate its ready lifecycle")
   .argument("<node-path>", "Node path")
   .argument("<script-path>", "Script path (e.g. res://player.gd)")
-  .action(async (nodePath: string, scriptPath: string) => {
-    await run("attach_script", { path: nodePath, script: scriptPath });
+  .option("--no-activate", "Attach without running _ready(), for scenes being assembled before save")
+  .action(async (nodePath: string, scriptPath: string, opts: { activate: boolean }) => {
+    await run("attach_script", {
+      path: nodePath,
+      script: scriptPath,
+      activate: opts.activate,
+    });
   });
 
 program

@@ -35,6 +35,7 @@ The executable is named **`uo-godot-cli`** to avoid colliding with the unrelated
 |---|---|---:|---:|
 | Audit a project before touching it | `project preflight` | No | No |
 | Compare CLI and `godot_ai` capabilities | `project compatibility` | No | Only with `--live` |
+| Inspect one addon-manifest v1 file | `mod manifest inspect` | No | No |
 | Start and own one local runtime | `runtime start` | Yes | Yes |
 | Prove one scene and stop cleanly | `scene validate` | Yes | Yes |
 | Run an allowlisted project test | `test list`, then `test run` | Runner-dependent | No runtime token |
@@ -208,6 +209,24 @@ shared family is not a claim that both control planes are behaviorally identical
 MCP tools with bounded JSON/SSE pagination. It never enables a gate or invokes
 an MCP tool.
 
+### Mod manifest structural inspection
+
+```bash
+uo-godot-cli mod manifest inspect /path/to/addon-manifest.json
+```
+
+The command reads one explicit regular `.json` file (maximum 256 KiB), rejects
+symbolic paths and invalid UTF-8, applies bounded JSON traversal, and mirrors
+the structural fields, SemVer, token, budget, signature-envelope, and mutable
+state rules of Zig2 `addon-manifest` schema v1. Unknown fields and duplicate
+signed tokens are deterministic warnings; signed array order is preserved.
+
+Every report deliberately returns `trustVerdict: "not_checked"`,
+`packageIntegrity: "not_checked"`, `activationEligible: false`, and
+`serverAuthorityRequired: true`. The command does not read a mod package or
+trust store, verify Ed25519, install, activate, migrate, roll back, sandbox, or
+execute mod code. Only `zig-server-v2` can establish trust and lifecycle state.
+
 ### Managed runtime
 
 ```bash
@@ -276,6 +295,31 @@ Static or isolated import evidence is not GPU, VRAM, visual-quality,
 collision-quality, performance, or OpenXR proof. This command validates; it
 does not generate LODs, collisions, texture atlases, conversions, signatures,
 or mod packages.
+
+### Template registry inspection
+
+```bash
+uo-godot-cli template registry inspect /path/to/ultod-json-template-registry
+```
+
+This local, tokenless, read-only command verifies catalog v2 structure, known
+validation profiles, confined catalog paths, exact full-file SHA-256, the common
+contract schema, strict family schema links, strict template identity, and
+evidence-bearing `godot-vr` compatibility records. It reads only
+`templates/catalog.json` and files named by that catalog; it does not scan the
+tree or access the network.
+
+Readiness is deliberately layered. `integrityReady` means the bounded
+inspection completed without error. `strictContentReady` additionally requires
+at least one verified strict family schema and linked `strict-v1` template.
+`consumerReady` additionally requires exact `godot-vr` compatibility evidence.
+An integral legacy-only registry returns exit 0 with `consumerReady: false`;
+legacy entries and `intended_consumers` hints never count as compatibility.
+
+Inspection does not execute Draft 2020-12, recompute canonical
+`spec_checksum`, detect duplicate JSON keys, validate or instantiate a template,
+migrate content, run Python/Godot, or prove runtime compatibility. Accordingly,
+`template validate`, `instantiate`, and `migrate` are not exposed.
 
 ### Project test profiles
 
@@ -366,9 +410,20 @@ Requires `GODOT_CLI_ALLOW_UNSAFE=1` before Godot starts:
 uo-godot-cli eval "get_tree().current_scene.name"
 uo-godot-cli call-method /root/Main/Player take_damage 25
 uo-godot-cli attach-script /root/Main/Player res://scripts/player.gd
+uo-godot-cli attach-script /root/Main/Template res://scripts/template.gd --no-activate
 uo-godot-cli create-file res://scripts/generated.gd --content "extends Node"
 uo-godot-cli save-scene --path res://scenes/modified.tscn
 ```
+
+`attach-script` activates the newly attached script by delivering its ready lifecycle, so `_ready()`, `@onready`, and process callbacks are live immediately. Use `--no-activate` only while assembling a scene for a later `save-scene` when running `_ready()` would create nodes that should not be baked into the scene.
+
+For a new scripted node, prefer the one-step form below. It attaches the script before the node enters the tree and therefore requires both the mutation and unsafe gates:
+
+```bash
+uo-godot-cli add-node /root/Main --script res://scripts/player.gd --name Player
+```
+
+Single-expression `eval` calls return their value automatically. Statement bodies return `null` unless they contain an explicit `return`; assignments are classified as statements without emitting a speculative parse error.
 
 File operations are confined to `res://`; individual files are limited to 4 MiB.
 
@@ -432,7 +487,9 @@ Only loopback hosts are accepted. `localhost` is resolved and revalidated before
 
 | Gate | Result | Proof boundary |
 |---|---|---|
+| Asset + Template + Mod merged integration gate, 2026-08-29 | **138 passed, 0 failed, 0 skipped** | Real Godot 4.7-dev5 disposable asset import, FoveaCore bridge, 6,382-file template registry inspection, strict-to-legacy supersession graph, Zig addon-manifest/trust-store parity, package consumer, runtime and scene validation. This remains local development evidence, not GPU, VRAM, visual-quality, collision-quality, performance, production, or OpenXR proof. |
 | Asset validation + Godot 4.7-dev5 local gate, 2026-08-22 | **98 passed, 0 failed, 1 skipped** out of 99 | Static glTF/GLB, dependency, policy, package CLI, real disposable mesh import, collision-required rejection, and canonical source fingerprints. Fovea remained explicitly skipped; this is not GPU, VRAM, visual-quality, collision-quality, performance, or OpenXR proof. |
+| Template registry inspection + real registry, 2026-08-23 | **75 passed, 0 failed, 14 skipped** out of 89 | Installed CLI plus two deterministic read-only passes over 4,064 catalogued files; 4,063 legacy, one common strict schema, zero strict templates, integrity ready and consumer not ready. Godot/Fovea tests remained explicitly skipped; inspection is not schema validation, instantiation, migration, or runtime compatibility proof. |
 | Default `npm test`, 2026-08-14 | **69 passed, 0 failed, 14 skipped** out of 83 | Build, Node protocol, compatibility catalog, installer, package consumer, project preflight, readiness, security invariants, managed-process controls, test-profile positives/negatives, and local scene-validation negatives. Real Godot and Fovea scenarios were explicitly skipped. |
 | Godot 4.7-dev5 local integration gate, 2026-08-14 | **82 passed, 0 failed, 1 skipped** out of 83 | Real headless Godot protocol, managed lifecycle, clean/structural/parse-error scene proofs, and a real `godot_script` test profile. Only the cross-repository FoveaEngine scenario was skipped. |
 | Fully configured local integration gate, 2026-08-14 | **83 passed, 0 failed, 0 skipped** with Godot 4.7-dev5 and the local FoveaEngine checkout | CLI/addon runtime, compatibility fail-closed controls, managed-process lifecycle, bounded test profiles, clean/error scene validation, and a temporary one-splat Fovea project; not GPU, visual-quality, production, or OpenXR proof. |

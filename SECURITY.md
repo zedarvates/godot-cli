@@ -74,6 +74,28 @@ Godot, import assets, follow symbolic links, or write project files.
 - Static scanning cannot validate Godot's binary UID cache. UID use is reported
   as requiring a later runtime scene-load gate.
 
+## Template registry inspection boundary
+
+`template registry inspect <root>` is local, tokenless, read-only, and is not a
+live runtime/addon command.
+
+- The explicit root, fixed `templates/catalog.json`, and every named file are
+  canonicalized. Symlinks, junction escapes, traversal, absolute/UNC/drive
+  paths, URLs, query/fragment, NUL, backslash, and malformed percent encoding
+  fail closed.
+- The command reads only catalogued files. Catalog, entries, aliases, individual
+  JSON files, total bytes, JSON depth/arrays/strings/values, and findings are
+  bounded before or during access. File-size totals are checked before hashing.
+- Known profiles and contract versions are closed. Legacy never counts as
+  strict content. `intended_consumers` never counts as compatibility.
+- Consumer readiness requires a verified strict family schema, linked strict
+  template, and closed evidence-bearing `godot-vr` compatibility record.
+- No child process, Python, Godot, network operation, schema evaluator, addon,
+  MCP tool, template mutation, or migration is used.
+- Node JSON parsing does not detect duplicate keys. Inspection also does not
+  execute JSON Schema or recompute canonical `spec_checksum`; the registry's
+  own validator remains authoritative for those publication gates.
+
 ## Managed process boundary
 
 `runtime start/status/logs/stop` use a per-project registry outside the Godot
@@ -191,6 +213,34 @@ project-defined test entry.
 - SHA-256 evidence covers the manifest and entry before/after execution. It is
   not a project-wide write audit: test code may create `.godot`, `bin`, `obj`,
   reports, screenshots, or other declared test artifacts.
+
+## Mod manifest inspection boundary
+
+`uo-godot-cli mod manifest inspect <manifest.json>` is a local, read-only
+structural mirror of the Zig2 addon-manifest schema v1. It requires one explicit
+regular `.json` file, rejects symbolic filesystem aliases, limits input to
+256 KiB, decodes UTF-8 fatally, and fingerprints the bytes before and after
+inspection. JSON depth, arrays, strings, visited values, and findings are
+bounded; incomplete inspection fails closed.
+
+The signature check covers only the Ed25519 envelope shape. The command never
+loads a publisher trust store, verifies cryptographic trust, reads or hashes a
+package, connects to a server, starts a child process, or executes mod code.
+It exposes no install, activate, migrate, rollback, sandbox, or lifecycle
+operation. Consequently every report fixes trust and package integrity to
+`not_checked`, activation eligibility to `false`, and server authority to
+`true`, even for an active/verified/admitted structure.
+
+The eleven signed claim names are reported for auditability, but the CLI does
+not serialize or hash a signing payload. Permissions and capabilities preserve
+their input order. Unknown root/signature fields and duplicate signed tokens
+are warnings because Zig's generic parser accepts unknown fields; warnings are
+not evidence of compatibility or trust.
+
+Duplicate JSON object-member occurrences cannot be proven after parser
+normalization; the report makes no object-key uniqueness claim. Producers that
+require this stricter property must reject duplicates before emitting a
+manifest.
 
 ## Remaining limitations
 

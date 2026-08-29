@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -118,6 +119,42 @@ test("packed CLI installs and manages its addon outside the source tree", async 
     sourceManifest.version
   );
 
+  const addonManifestFile = path.join(temporaryRoot, "addon-manifest.json");
+  const addonManifestBytes = Buffer.from(JSON.stringify({
+    schema_version: 1,
+    id: "addon_package_consumer",
+    name: "Package Consumer Addon",
+    version: "1.0.0",
+    engine_api: "2.1",
+    publisher: "Ultimate Odycer Test",
+    package_sha256: "0123456789abcdef".repeat(4),
+    signature_status: "pending",
+    signature: {
+      algorithm: "ed25519",
+      publisher_key_id: "uo.test.primary",
+      value_base64: `${"A".repeat(86)}==`,
+    },
+    status: "registered",
+    permissions: [],
+    capabilities: ["world.read"],
+    cpu_budget_ms: 4.5,
+    memory_budget_mb: 128,
+  }));
+  await fs.writeFile(addonManifestFile, addonManifestBytes);
+  const modReport = JSON.parse(
+    runInstalledCli(
+      cliPath,
+      ["mod", "manifest", "inspect", addonManifestFile],
+      consumer
+    )
+  );
+  assert.equal(modReport.status, "ok");
+  assert.equal(modReport.trustVerdict, "not_checked");
+  assert.equal(modReport.packageIntegrity, "not_checked");
+  assert.equal(modReport.activationEligible, false);
+  assert.equal(modReport.serverAuthorityRequired, true);
+  assert.deepEqual(await fs.readFile(addonManifestFile), addonManifestBytes);
+
   const projectDefinition = `config_version=5
 
 [application]
@@ -143,6 +180,60 @@ config/name="Package Consumer Test"
   assert.equal(assetReport.status, "ok");
   assert.equal(assetReport.closure.fileCount, 1);
   assert.equal(await fs.readFile(assetFile, "utf8"), assetDefinition);
+
+  const registry = path.join(temporaryRoot, "template-registry");
+  const schemaResource =
+    "templates/schemas/template-contract/v1.0.0/schema.json";
+  const schema = JSON.stringify({
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ultimateodycer.com/schemas/template-contract/1.0.0",
+    type: "object",
+    required: [
+      "$schema", "contract_version", "id", "slug", "family", "version",
+      "authority", "intended_consumers", "compatibility", "dependencies",
+      "spec_checksum", "spec",
+    ],
+    properties: {},
+    additionalProperties: false,
+  });
+  const schemaFile = path.join(registry, ...schemaResource.split("/"));
+  await fs.mkdir(path.dirname(schemaFile), { recursive: true });
+  await fs.writeFile(schemaFile, schema, "utf8");
+  const catalogFile = path.join(registry, "templates", "catalog.json");
+  await fs.mkdir(path.dirname(catalogFile), { recursive: true });
+  await fs.writeFile(
+    catalogFile,
+    JSON.stringify({
+      registry_version: "2.0.0",
+      generated_at: "2026-08-23",
+      source_set: "package-consumer",
+      entries: [
+        {
+          name: "template-contract",
+          kind: "json-schema",
+          version: "1.0.0",
+          status: "experimental",
+          file: schemaResource,
+          sha256: createHash("sha256").update(schema).digest("hex"),
+          compatibility: [],
+          validation_profile: "strict-schema-v1",
+          contract_version: "1.0.0",
+        },
+      ],
+      aliases: [],
+    }),
+    "utf8"
+  );
+  const registryReport = JSON.parse(
+    runInstalledCli(
+      cliPath,
+      ["template", "registry", "inspect", registry],
+      consumer
+    )
+  );
+  assert.equal(registryReport.status, "ok");
+  assert.equal(registryReport.complete, true);
+  assert.equal(registryReport.consumerReady, false);
 
   const before = JSON.parse(
     runInstalledCli(cliPath, ["addon", "status", project], consumer)

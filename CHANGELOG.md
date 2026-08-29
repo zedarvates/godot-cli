@@ -7,6 +7,11 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Added
 
+- `mod manifest inspect <manifest.json>` for bounded local structural checks of
+  the Zig2 addon-manifest schema v1, including byte-integrity evidence and
+  deterministic findings.
+- Optional test-only parity gates for the authoritative Zig manifest and trust
+  store suites when `UO_ZIG_SERVER_ROOT` is explicitly configured.
 - Bounded `asset validate` support for project-local glTF 2.0 `.gltf` and
   `.glb` files, including local dependency closure, fingerprints, indexed
   reference checks, portable metrics, PNG/JPEG header dimensions, and the
@@ -14,12 +19,32 @@ pre-release versions until the public API and operational boundary are stable.
 - Optional disposable Godot 4.7 import evidence with XR disabled, a scrubbed
   child environment, bounded logs, source-integrity checks, collision-node
   presence reporting, and fail-closed cleanup.
+- Read-only `template registry inspect <root>` for bounded catalog v2, profile,
+  contract, schema-link, exact SHA-256, strict-content, and `godot-vr`
+  compatibility-evidence inspection.
+
+### Security
+
+- Mod inspection always reports trust and package integrity as `not_checked`,
+  activation as ineligible, and Zig2 authority as required. It does not read
+  packages or trust stores, verify signatures, execute mods, or mutate their
+  lifecycle.
+
+### Changed
+
+- Template registry inspection now recognizes family schemas composed from the
+  exact verified common-contract `$id` and validates reciprocal strict-to-legacy
+  supersession links. Arbitrary remote schema references remain rejected.
 
 ### Known boundaries
 
 - Static and isolated-import evidence is not GPU, VRAM, visual-quality,
   collision-quality, performance, or OpenXR proof. The command does not
   generate LODs, collisions, atlases, conversions, signatures, or packages.
+- Inspection does not execute JSON Schema, recompute canonical
+  `spec_checksum`, detect duplicate JSON keys, validate, instantiate, migrate,
+  run registry Python, start Godot, access the network, or prove runtime
+  compatibility.
 
 ## 0.1.0-uo.7 — 2026-08-14
 

@@ -26,6 +26,20 @@ const MAX_ASSERT_CHECKS := 256
 const FOVEA_BRIDGE_PATH := "res://addons/foveacore/scripts/integration/fovea_cli_bridge.gd"
 const FOVEA_CONTRACT_VERSION := 1
 
+const CONDITIONALLY_UNSAFE_COMMANDS := {
+	"add_node": true,
+	"wait_for": true,
+	"assert": true,
+}
+
+const EVAL_STATEMENT_KEYWORDS := {
+	"var": true, "const": true, "static": true, "enum": true, "signal": true,
+	"func": true, "class": true, "class_name": true, "extends": true,
+	"if": true, "elif": true, "else": true, "for": true, "while": true,
+	"match": true, "when": true, "return": true, "pass": true, "break": true,
+	"continue": true, "breakpoint": true, "assert": true,
+}
+
 const COMMAND_DESCRIPTIONS := {
 	"ping": "Probe authenticated Godot runtime readiness.",
 	"commands": "List live commands, capability gates, and agent-facing safety metadata.",
@@ -139,6 +153,7 @@ var _pending_waits: Array[Dictionary] = []
 # --- Lifecycle ---
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	if not OS.is_debug_build():
 		push_error("GodotCLI: Refusing to start outside an editor or debug build")
 		set_process(false)
@@ -389,7 +404,7 @@ func _command_catalog_entries(
 ) -> Array[Dictionary]:
 	var entries: Array[Dictionary] = []
 	for command in _sorted_command_names(commands):
-		var conditionally_unsafe := command == "wait_for" or command == "assert"
+		var conditionally_unsafe := CONDITIONALLY_UNSAFE_COMMANDS.has(command)
 		var read_only := security == "read_only" and not conditionally_unsafe
 		entries.append({
 			"name": command,
@@ -483,15 +498,19 @@ func _command_denial(command: String, params: Dictionary) -> String:
 	if MUTATING_COMMANDS.has(command):
 		if not _allow_mutations:
 			return "Mutation commands are disabled; set GODOT_CLI_ALLOW_MUTATIONS=1 before launching Godot"
+		if _params_require_unsafe(command, params) and not _allow_unsafe:
+			return "Unsafe commands are disabled; set GODOT_CLI_ALLOW_UNSAFE=1 before launching Godot"
 		return ""
 	if UNSAFE_COMMANDS.has(command):
 		if not _allow_unsafe:
 			return "Unsafe commands are disabled; set GODOT_CLI_ALLOW_UNSAFE=1 before launching Godot"
 		return ""
-	return ""
+	return "Command is not present in the security catalog and is refused by default"
 
 
 func _params_require_unsafe(command: String, params: Dictionary) -> bool:
+	if command == "add_node":
+		return not str(params.get("script", "")).is_empty()
 	if command == "wait_for":
 		return not str(params.get("expr", "")).is_empty()
 	if command != "assert":
@@ -800,20 +819,40 @@ func _cmd_add_node(params: Dictionary) -> Dictionary:
 	var type: String = params.get("type", "")
 	var node_name: String = params.get("name", "")
 	var properties: Dictionary = params.get("properties", {})
+	var script_path: String = params.get("script", "")
 
-	if parent_path.is_empty() or type.is_empty():
-		return {"status": "error", "error": "Missing 'parent' or 'type' parameter"}
+	if parent_path.is_empty():
+		return {"status": "error", "error": "Missing 'parent' parameter"}
+	if type.is_empty() and script_path.is_empty():
+		return {"status": "error", "error": "Provide 'type', 'script', or both"}
 
 	var parent := get_tree().root.get_node_or_null(parent_path)
 	if parent == null:
 		return {"status": "error", "error": "Parent not found: " + parent_path}
 
-	if not ClassDB.class_exists(type):
-		return {"status": "error", "error": "Unknown class: " + type}
-	if not ClassDB.can_instantiate(type):
-		return {"status": "error", "error": "Cannot instantiate: " + type}
-
-	var node: Node = ClassDB.instantiate(type) as Node
+	var node: Node = null
+	if not script_path.is_empty():
+		if _resolve_project_path(script_path).is_empty():
+			return {"status": "error", "error": "Script path must stay inside res://"}
+		var script := _load_script(script_path)
+		if script == null:
+			return {"status": "error", "error": "Cannot load script: " + script_path}
+		var instance = script.new()
+		if not (instance is Node):
+			if instance is Object:
+				(instance as Object).free()
+			return {"status": "error", "error": "Script does not extend Node: " + script_path}
+		node = instance as Node
+		if not type.is_empty() and not node.is_class(type):
+			var actual_type := node.get_class()
+			node.free()
+			return {"status": "error", "error": "Script instantiates a %s, not a %s" % [actual_type, type]}
+	else:
+		if not ClassDB.class_exists(type):
+			return {"status": "error", "error": "Unknown class: " + type}
+		if not ClassDB.can_instantiate(type):
+			return {"status": "error", "error": "Cannot instantiate: " + type}
+		node = ClassDB.instantiate(type) as Node
 	if node_name:
 		node.name = node_name
 
@@ -822,9 +861,16 @@ func _cmd_add_node(params: Dictionary) -> Dictionary:
 
 	parent.add_child(node)
 	if get_tree().current_scene:
-		node.owner = get_tree().current_scene
+		_set_owner_recursive(node, get_tree().current_scene)
 
-	return {"status": "ok", "data": {"path": str(node.get_path()), "type": type, "name": str(node.name)}}
+	return {"status": "ok", "data": {
+		"path": str(node.get_path()),
+		"type": node.get_class(),
+		"name": str(node.name),
+		"script": script_path,
+		"processing": node.is_processing(),
+		"physics_processing": node.is_physics_processing(),
+	}}
 
 
 func _cmd_remove_node(params: Dictionary) -> Dictionary:
@@ -906,34 +952,121 @@ func _cmd_eval(params: Dictionary) -> Dictionary:
 	if code.is_empty():
 		return {"status": "error", "error": "Missing 'code' or 'expression' parameter"}
 
-	var script := GDScript.new()
 	var lines := code.split("\n")
+	var trimmed := code.strip_edges()
 
-	# Try as single-line expression first (auto-return)
-	if lines.size() == 1:
-		script.source_code = "extends Node\n\nfunc _exec():\n\treturn " + code.strip_edges() + "\n"
-		if script.reload() == OK:
-			var obj = script.new()
-			add_child(obj)
-			var result = obj.call("_exec")
-			obj.queue_free()
-			return {"status": "ok", "data": _serialize(result)}
+	if _eval_has_await(trimmed):
+		return {"status": "error", "error": "eval cannot await; use wait-for with an expression instead"}
 
-	# Multi-line or failed expression: run as statements
+	if lines.size() == 1 and not trimmed.is_empty() and _eval_is_expression(trimmed):
+		var expression_result := _eval_run("extends Node\n\nfunc _exec():\n\treturn " + trimmed + "\n", true)
+		if bool(expression_result["ok"]):
+			return {"status": "ok", "form": "expression", "data": _serialize(expression_result["value"])}
+
 	var indented := ""
 	for line in lines:
 		indented += "\t" + line + "\n"
 
-	script.source_code = "extends Node\n\nfunc _exec():\n" + indented
-	var err := script.reload()
-	if err != OK:
+	var statement_result := _eval_run("extends Node\n\nfunc _exec():\n" + indented, false)
+	if not bool(statement_result["ok"]):
 		return {"status": "error", "error": "GDScript compilation error"}
+	return {"status": "ok", "form": "statement", "data": _serialize(statement_result["value"])}
 
+
+func _eval_run(source: String, silence_parse_errors: bool) -> Dictionary:
+	var script := GDScript.new()
+	script.source_code = source
+	var err: int
+	if silence_parse_errors:
+		var was_printing := Engine.print_error_messages
+		Engine.print_error_messages = false
+		err = script.reload()
+		Engine.print_error_messages = was_printing
+	else:
+		err = script.reload()
+	if err != OK:
+		return {"ok": false, "value": null}
 	var obj = script.new()
 	add_child(obj)
-	var result = obj.call("_exec")
+	var value = obj.call("_exec")
 	obj.queue_free()
-	return {"status": "ok", "data": _serialize(result)}
+	return {"ok": true, "value": value}
+
+
+func _eval_is_expression(line: String) -> bool:
+	if line.begins_with("@"):
+		return false
+	if EVAL_STATEMENT_KEYWORDS.has(_eval_leading_word(line)):
+		return false
+	return not _eval_has_top_level_assignment(line)
+
+
+func _eval_leading_word(line: String) -> String:
+	var out := ""
+	for i in range(line.length()):
+		var c := line[i]
+		var alpha := (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+		var digit := c >= "0" and c <= "9"
+		if alpha or (not out.is_empty() and digit):
+			out += c
+		else:
+			break
+	return out
+
+
+func _eval_has_top_level_assignment(line: String) -> bool:
+	var depth := 0
+	var i := 0
+	var n := line.length()
+	while i < n:
+		var c := line[i]
+		if c == "#":
+			return false
+		if c == "\"" or c == "'":
+			i = _eval_skip_string(line, i)
+			continue
+		if c == "(" or c == "[" or c == "{":
+			depth += 1
+		elif c == ")" or c == "]" or c == "}":
+			depth -= 1
+		elif c == "=" and depth <= 0:
+			if i + 1 < n and line[i + 1] == "=":
+				i += 2
+				continue
+			var previous := line[i - 1] if i > 0 else " "
+			if previous == "<" or previous == ">":
+				if i >= 2 and line[i - 2] == previous:
+					return true
+				i += 1
+				continue
+			if previous == "!" or previous == "=":
+				i += 1
+				continue
+			return true
+		i += 1
+	return false
+
+
+func _eval_skip_string(line: String, start: int) -> int:
+	var quote := line[start]
+	var n := line.length()
+	if start + 2 < n and line[start + 1] == quote and line[start + 2] == quote:
+		var close := line.find(quote + quote + quote, start + 3)
+		return n if close == -1 else close + 3
+	var i := start + 1
+	while i < n:
+		var c := line[i]
+		if c == "\\":
+			i += 2
+			continue
+		if c == quote:
+			return i + 1
+		i += 1
+	return n
+
+
+func _eval_has_await(line: String) -> bool:
+	return _eval_leading_word(line) == "await" or line.contains(" await ")
 
 # --- Screenshot ---
 
@@ -1163,13 +1296,42 @@ func _cmd_attach_script(params: Dictionary) -> Dictionary:
 	var node := get_tree().root.get_node_or_null(node_path)
 	if node == null:
 		return {"status": "error", "error": "Node not found: " + node_path}
+	if node == self:
+		return {"status": "error", "error": "Refusing to script the CLI server itself"}
+	if node == get_tree().root:
+		return {"status": "error", "error": "Refusing to script the root Window"}
 
-	var script = load(script_path)
+	var script := _load_script(script_path)
 	if script == null:
 		return {"status": "error", "error": "Cannot load script: " + script_path}
 
+	var native_base := script.get_instance_base_type()
+	if not native_base.is_empty() and not node.is_class(native_base):
+		return {"status": "error", "error": "Script extends %s but %s is a %s" % [native_base, node_path, node.get_class()]}
+
 	node.set_script(script)
-	return {"status": "ok", "data": {"node": node_path, "script": script_path}}
+	if node.get_script() != script:
+		return {"status": "error", "error": "set_script() was rejected for " + node_path}
+
+	var activate := true
+	if params.has("activate"):
+		activate = bool(params["activate"])
+	elif bool(params.get("no_activate", false)):
+		activate = false
+	if activate:
+		node.notification(NOTIFICATION_READY)
+
+	return {"status": "ok", "data": {
+		"node": node_path,
+		"script": script_path,
+		"activated": activate,
+		"processing": node.is_processing(),
+		"physics_processing": node.is_physics_processing(),
+	}}
+
+
+func _load_script(script_path: String) -> Script:
+	return ResourceLoader.load(script_path, "", ResourceLoader.CACHE_MODE_IGNORE) as Script
 
 
 func _cmd_detach_script(params: Dictionary) -> Dictionary:
@@ -1345,7 +1507,16 @@ func _check_pending_waits() -> void:
 			# Property mode
 			var node := get_tree().root.get_node_or_null(wait["path"] as String)
 			if node != null:
-				var value = node.get(wait["property"] as String)
+				var read := _read_property(node, wait["property"] as String)
+				if not bool(read["ok"]):
+					_send(wait["client"], {
+						"id": wait["id"],
+						"status": "error",
+						"error": read["error"],
+					})
+					to_remove.append(i)
+					continue
+				var value = read["value"]
 				if wait.has("equals"):
 					satisfied = _values_equal(value, _deserialize(wait["equals"]))
 				else:
@@ -1517,12 +1688,24 @@ func _cmd_assert(params: Dictionary) -> Dictionary:
 				}
 			else:
 				var prop_name: String = c["property"]
-				var value = node.get(prop_name)
+				var read := _read_property(node, prop_name)
+				if not bool(read["ok"]):
+					results.append({
+						"type": "property",
+						"path": c["path"],
+						"property": prop_name,
+						"passed": false,
+						"error": read["error"],
+					})
+					all_passed = false
+					continue
+				var value = read["value"]
 				var passed := false
+				var expected = null
 
 				if c.has("equals"):
 					passed = _values_equal(value, _deserialize(c["equals"]))
-					result["expected"] = _serialize(_deserialize(c["equals"]))
+					expected = _serialize(_deserialize(c["equals"]))
 				elif c.has("not_equals"):
 					passed = not _values_equal(value, _deserialize(c["not_equals"]))
 				elif c.has("greater_than"):
@@ -1542,6 +1725,8 @@ func _cmd_assert(params: Dictionary) -> Dictionary:
 					"passed": passed,
 					"actual": _serialize(value),
 				}
+				if expected != null:
+					result["expected"] = expected
 		else:
 			result = {"type": "unknown", "passed": false, "error": "Invalid check format"}
 
@@ -1897,6 +2082,15 @@ func _cmd_fovea_status(_params: Dictionary) -> Dictionary:
 		# FoveaCore is optional: discovery remains a successful read-only probe.
 		return {"status": "ok", "data": result["data"]}
 	return result
+
+
+func _read_property(node: Object, property: String) -> Dictionary:
+	for entry in node.get_property_list():
+		if entry["name"] == property:
+			return {"ok": true, "value": node.get(property)}
+	if node.has_method(property):
+		return {"ok": false, "error": "'%s' is a method, not a property; use call-method or an expression" % property}
+	return {"ok": true, "value": node.get(property)}
 
 
 func _cmd_fovea_validate(_params: Dictionary) -> Dictionary:
