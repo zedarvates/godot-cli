@@ -55,8 +55,6 @@ This copies `godot-addon/addons/godot_cli/` into the project and writes the thre
 
 - the plugin under `[editor_plugins]`,
 - the `GodotCLI` **autoload** — without it the running game has no TCP server at all,
-  because `plugin.gd` registers the autoload on `_enter_tree` and removes it again on
-  `_exit_tree`,
 - `debug/file_logging/enable_file_logging`, which is where `get-logs` reads
   engine-level errors and warnings from.
 
@@ -204,6 +202,25 @@ godot-cli highlight-node /root/Main/Player --duration 3.0
 godot-cli commands
 godot-cli server-info
 ```
+
+### GReFormer compatibility
+
+Most 3D generation commands are now implemented directly in `godot-cli` and **do not require GReFormer**. The following eight legacy/interoperability commands still require an external addon installed at `res://addons/greformer/`:
+
+| External GReFormer required | Built into godot-cli |
+|---|---|
+| `greformer_create` | `greformer_generate_stairs` |
+| `greformer_push_pull` | `greformer_generate_terrain` |
+| `greformer_apply_hotspot` | `greformer_generate_tunnel` |
+| `greformer_bake` | `greformer_generate_archway` |
+| `greformer_export_obj` | `greformer_generate_collision` |
+| `greformer_create_preset` | `greformer_array_duplicate` |
+| `greformer_snap_grid` | `greformer_set_shading` |
+| `greformer_carve_hole` | `greformer_paint_color` |
+
+The external addon is **optional**. A normal `godot-cli` installation is complete without it. If one of the eight interoperability commands is called without `res://addons/greformer/`, the command must be treated as unavailable rather than as a failure of the core CLI. `greformer_bevel` remains an explicit unsupported operation rather than returning a false success.
+
+This separation is intentional: agents can rely on the built-in command set on a clean Godot project, while projects that already use GReFormer retain compatibility hooks.
 
 ### Input simulation
 
