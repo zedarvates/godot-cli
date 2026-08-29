@@ -29,6 +29,7 @@ import {
   type RuntimeMode,
 } from "./runtime.js";
 import { validateSceneFile } from "./scene-validation.js";
+import { validateAsset } from "./asset-validation.js";
 import { inspectTemplateRegistry } from "./template-registry-inspection.js";
 import { listTestProfiles, runTestProfile } from "./test-runner.js";
 import { inspectModManifest } from "./mod-manifest-inspection.js";
@@ -121,6 +122,12 @@ MANAGED RUNTIME (token required; exact addon/autoload required for start)
 
 SCENE FILE VALIDATION (managed, safe-mode, no save)
   scene validate <scene> [--project PATH]   Load, inspect logs, validate and stop
+
+ASSET VALIDATION (local, read-only; optional isolated Godot import)
+  asset validate <asset> [--project PATH]   Check one project-local .gltf or .glb
+
+TEMPLATE REGISTRY (local, read-only; no schema execution)
+  template registry inspect <root>          Check catalog, schemas, checksums and readiness
 
 PROJECT TEST PROFILES (local manifest; no shell)
   test list [project]                       List declared profiles and availability
@@ -521,6 +528,57 @@ sceneCommands
           port: rootOptions.port,
           timeoutMs: Number(options.timeout) * 1000,
           intervalMs: Number(options.interval),
+        });
+        printLocalResult(report);
+        if (report.status !== "ok") process.exitCode = 1;
+      } catch (error) {
+        reportLocalError(error);
+      }
+    }
+  );
+
+// ---------------------------------------------------------------------------
+// Bounded project-local asset validation (local filesystem, read-only)
+// ---------------------------------------------------------------------------
+
+const assetCommands = program
+  .command("asset")
+  .description("Validate bounded project-local Godot assets");
+
+assetCommands
+  .command("validate")
+  .description("Validate one project-local .gltf or .glb without modifying it")
+  .argument("<asset>", "Project-local res:// .gltf or .glb path")
+  .option("--project <path>", "Godot project path; otherwise discover it")
+  .option("--policy <path>", "Project-local res:// uo-godot-asset-policy/1 JSON")
+  .option("--godot-import", "Run an isolated disposable Godot import proof")
+  .option("--godot <path>", "Godot executable for the requested import proof")
+  .option("--timeout <seconds>", "Maximum time for each Godot child", "30")
+  .action(
+    async (
+      asset: string,
+      options: {
+        project?: string;
+        policy?: string;
+        godotImport?: boolean;
+        godot?: string;
+        timeout: string;
+      }
+    ) => {
+      try {
+        const timeout = Number(options.timeout);
+        if (!Number.isFinite(timeout) || timeout <= 0 || timeout > 300) {
+          throw new Error(
+            "--timeout must be a finite number between 0 and 300 seconds"
+          );
+        }
+        const report = await validateAsset({
+          asset,
+          project: options.project,
+          policy: options.policy,
+          godotImport: options.godotImport === true,
+          godot: options.godot,
+          timeoutMs: timeout * 1000,
         });
         printLocalResult(report);
         if (report.status !== "ok") process.exitCode = 1;

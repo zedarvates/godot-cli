@@ -162,6 +162,24 @@ config/name="Package Consumer Test"
 `;
   const projectFile = path.join(project, "project.godot");
   await fs.writeFile(projectFile, projectDefinition, "utf8");
+  const assetDefinition = JSON.stringify({ asset: { version: "2.0" } });
+  const assetFile = path.join(project, "model.gltf");
+  await fs.writeFile(assetFile, assetDefinition, "utf8");
+
+  assert.match(
+    runInstalledCli(cliPath, ["asset", "validate", "--help"], consumer),
+    /\.gltf or \.glb/
+  );
+  const assetReport = JSON.parse(
+    runInstalledCli(
+      cliPath,
+      ["asset", "validate", "res://model.gltf", "--project", project],
+      consumer
+    )
+  );
+  assert.equal(assetReport.status, "ok");
+  assert.equal(assetReport.closure.fileCount, 1);
+  assert.equal(await fs.readFile(assetFile, "utf8"), assetDefinition);
 
   const registry = path.join(temporaryRoot, "template-registry");
   const schemaResource =

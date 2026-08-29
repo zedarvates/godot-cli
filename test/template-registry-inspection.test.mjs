@@ -192,6 +192,199 @@ test("inspection recognizes an exact strict family schema without content readin
   assert.deepEqual(report.reasons, ["No strict-v1 template is catalogued."]);
 });
 
+test("inspection accepts a family schema composed from the exact common contract id", async (t) => {
+  const root = await createRegistry(t);
+  const resource = "templates/schemas/classes/v1.0.0/schema.json";
+  const schema = JSON.stringify({
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ultimateodycer.com/schemas/classes/1.0.0",
+    allOf: [
+      { $ref: "https://ultimateodycer.com/schemas/template-contract/1.0.0" },
+      {
+        properties: {
+          spec: { type: "object", additionalProperties: false },
+        },
+      },
+    ],
+  });
+  const file = path.join(root, ...resource.split("/"));
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, schema, "utf8");
+  const catalogFile = path.join(root, "templates", "catalog.json");
+  const catalog = JSON.parse(await fs.readFile(catalogFile, "utf8"));
+  catalog.entries.push({
+    name: "classes",
+    kind: "json-schema",
+    version: "1.0.0",
+    status: "experimental",
+    file: resource,
+    sha256: sha256(schema),
+    compatibility: [],
+    validation_profile: "strict-schema-v1",
+    contract_version: "1.0.0",
+  });
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+
+  const report = await inspectTemplateRegistry({ root });
+
+  assert.equal(report.status, "ok");
+  assert.equal(report.complete, true);
+  assert.equal(report.strictFamilySchemas, 1);
+  assert.equal(report.strictContentReady, false);
+  assert.equal(report.consumerReady, false);
+});
+
+test("inspection rejects a nested common-contract ref that does not compose the family root", async (t) => {
+  const root = await createRegistry(t);
+  const resource = "templates/schemas/classes/v1.0.0/schema.json";
+  const schema = JSON.stringify({
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ultimateodycer.com/schemas/classes/1.0.0",
+    properties: {
+      decoy: {
+        $ref: "https://ultimateodycer.com/schemas/template-contract/1.0.0",
+      },
+    },
+  });
+  const file = path.join(root, ...resource.split("/"));
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, schema, "utf8");
+  const catalogFile = path.join(root, "templates", "catalog.json");
+  const catalog = JSON.parse(await fs.readFile(catalogFile, "utf8"));
+  catalog.entries.push({
+    name: "classes",
+    kind: "json-schema",
+    version: "1.0.0",
+    status: "experimental",
+    file: resource,
+    sha256: sha256(schema),
+    compatibility: [],
+    validation_profile: "strict-schema-v1",
+    contract_version: "1.0.0",
+  });
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+
+  const report = await inspectTemplateRegistry({ root });
+
+  assert.equal(report.status, "error");
+  assert.equal(report.strictFamilySchemas, 0);
+  assert.ok(
+    report.findings.some(
+      (finding) => finding.code === "REGISTRY_SCHEMA_INVALID",
+    ),
+  );
+});
+
+test("inspection accepts an exact reciprocal strict-to-legacy supersession", async (t) => {
+  const root = await createRegistry(t);
+  const schemaResource = "templates/schemas/monsters/v1.0.0/schema.json";
+  const familySchema = JSON.stringify({
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ultimateodycer.com/schemas/monsters/1.0.0",
+    type: "object",
+    allOf: [{ $ref: "../../template-contract/v1.0.0/schema.json" }],
+    properties: { spec: { type: "object", additionalProperties: false } },
+    additionalProperties: false,
+  });
+  const schemaFile = path.join(root, ...schemaResource.split("/"));
+  await fs.mkdir(path.dirname(schemaFile), { recursive: true });
+  await fs.writeFile(schemaFile, familySchema, "utf8");
+
+  const legacyResource = "templates/monsters/forest-wolf/v0.1.0/template.json";
+  const legacy = JSON.stringify({ name: "forest-wolf" });
+  const legacyFile = path.join(root, ...legacyResource.split("/"));
+  await fs.mkdir(path.dirname(legacyFile), { recursive: true });
+  await fs.writeFile(legacyFile, legacy, "utf8");
+
+  const strictResource = "templates/monsters/forest-wolf/v1.0.0/template.json";
+  const specChecksum = `sha256:${"1".repeat(64)}`;
+  const strict = JSON.stringify({
+    $schema: "../../../schemas/monsters/v1.0.0/schema.json",
+    contract_version: "1.0.0",
+    id: "monsters:forest-wolf",
+    slug: "forest-wolf",
+    family: "monsters",
+    version: "1.0.0",
+    authority: "declarative",
+    intended_consumers: ["zig-server-v2"],
+    compatibility: [],
+    dependencies: [],
+    spec_checksum: specChecksum,
+    spec: {},
+  });
+  const strictFile = path.join(root, ...strictResource.split("/"));
+  await fs.mkdir(path.dirname(strictFile), { recursive: true });
+  await fs.writeFile(strictFile, strict, "utf8");
+
+  const catalogFile = path.join(root, "templates", "catalog.json");
+  const catalog = JSON.parse(await fs.readFile(catalogFile, "utf8"));
+  catalog.entries.push(
+    {
+      name: "monsters",
+      kind: "json-schema",
+      version: "1.0.0",
+      status: "experimental",
+      file: schemaResource,
+      sha256: sha256(familySchema),
+      compatibility: [],
+      validation_profile: "strict-schema-v1",
+      contract_version: "1.0.0",
+    },
+    {
+      name: "forest-wolf",
+      kind: "monster-template",
+      version: "0.1.0",
+      status: "experimental",
+      file: legacyResource,
+      sha256: sha256(legacy),
+      compatibility: [],
+      validation_profile: "legacy-unvalidated",
+      contract_version: null,
+      id: "monsters:forest-wolf",
+      slug: "forest-wolf",
+      family: "monsters",
+      superseded_by: "monsters:forest-wolf@1.0.0",
+    },
+    {
+      name: "forest-wolf",
+      kind: "monster-template",
+      version: "1.0.0",
+      status: "experimental",
+      file: strictResource,
+      sha256: sha256(strict),
+      compatibility: [],
+      validation_profile: "strict-v1",
+      contract_version: "1.0.0",
+      id: "monsters:forest-wolf",
+      slug: "forest-wolf",
+      family: "monsters",
+      schema_file: schemaResource,
+      spec_checksum: specChecksum,
+      intended_consumers: ["zig-server-v2"],
+      supersedes: ["monsters:forest-wolf@0.1.0"],
+    },
+  );
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+
+  const report = await inspectTemplateRegistry({ root });
+
+  assert.equal(report.status, "ok");
+  assert.equal(report.complete, true);
+  assert.equal(report.strictTemplates, 1);
+  assert.equal(report.strictContentReady, true);
+  assert.equal(report.consumerReady, false);
+
+  catalog.entries.at(-2).superseded_by = "monsters:other@1.0.0";
+  await fs.writeFile(catalogFile, JSON.stringify(catalog), "utf8");
+  const mismatched = await inspectTemplateRegistry({ root });
+  assert.equal(mismatched.status, "error");
+  assert.ok(
+    mismatched.findings.some(
+      (finding) => finding.code === "REGISTRY_REFERENCE_MISSING",
+    ),
+  );
+});
+
 test("inspection requires exact compatibility evidence beyond intended consumers", async (t) => {
   const root = await createRegistry(t);
   const schemaResource = "templates/schemas/monsters/v1.0.0/schema.json";

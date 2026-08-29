@@ -29,16 +29,22 @@ test(
     assert.deepEqual(second, first);
     assert.equal(first.status, "ok");
     assert.equal(first.complete, true);
-    assert.equal(first.catalog.entries, 4064);
-    assert.equal(first.catalog.verifiedFiles, 4064);
+    assert.equal(first.catalog.entries, 6382);
+    assert.equal(first.catalog.verifiedFiles, 6382);
     assert.deepEqual(first.profiles, {
       "legacy-unvalidated": 4063,
-      "strict-schema-v1": 1,
-      "strict-v1": 0,
+      "strict-schema-v1": 6,
+      "strict-v1": 2313,
     });
+    assert.equal(first.strictFamilySchemas, 5);
+    assert.equal(first.strictTemplates, 2313);
+    assert.equal(first.godotCompatibleTemplates, 0);
     assert.equal(first.integrityReady, true);
-    assert.equal(first.strictContentReady, false);
+    assert.equal(first.strictContentReady, true);
     assert.equal(first.consumerReady, false);
+    assert.deepEqual(first.reasons, [
+      "No strict-v1 template has exact godot-vr compatibility evidence.",
+    ]);
     assert.equal(gitStatus(REGISTRY_ROOT), before);
   }
 );

@@ -400,9 +400,18 @@ function validateFamilySchema(
   if (item.value.$id !== `https://ultimateodycer.com/schemas/${family}/${version}`) {
     throw new Error("Strict family schema $id disagrees with path");
   }
-  if (item.value.type !== "object") throw new Error("Strict family schema type must be object");
-  for (const reference of collectSchemaRefs(item.value)) {
+  const references = collectSchemaRefs(item.value);
+  const composesCommonContract =
+    Array.isArray(item.value.allOf) &&
+    item.value.allOf.some(
+      (member) => isRecord(member) && member.$ref === CONTRACT_SCHEMA_ID,
+    );
+  if (item.value.type !== "object" && !composesCommonContract) {
+    throw new Error("Strict family schema must be an object or compose the common contract");
+  }
+  for (const reference of references) {
     if (reference.startsWith("#")) continue;
+    if (reference === CONTRACT_SCHEMA_ID) continue;
     if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(reference) || reference.startsWith("/")) {
       throw new Error(`Strict family schema contains remote or absolute $ref: ${reference}`);
     }
@@ -645,6 +654,43 @@ export async function inspectTemplateRegistry(
 
   let strictTemplates = 0;
   let godotCompatibleTemplates = 0;
+  const referencePattern =
+    /^[a-z0-9]+(?:-[a-z0-9]+)*:[a-z0-9]+(?:-[a-z0-9]+)*@(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
+  const legacyDocuments = new Map<string, VerifiedEntry>();
+  for (const item of verified) {
+    if (item.entry.validation_profile !== "legacy-unvalidated") continue;
+    const metadataFields = ["id", "slug", "family", "superseded_by"];
+    if (!metadataFields.some((field) => field in item.entry)) continue;
+    try {
+      for (const field of metadataFields) {
+        boundedNonEmptyString(item.entry[field], `${item.resource}/${field}`);
+      }
+      const id = String(item.entry.id);
+      const slug = String(item.entry.slug);
+      const family = String(item.entry.family);
+      const source = `${id}@${item.entry.version}`;
+      const successor = String(item.entry.superseded_by);
+      if (
+        !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(family) ||
+        !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) ||
+        id !== `${family}:${slug}` ||
+        !referencePattern.test(source) ||
+        !referencePattern.test(successor) ||
+        source === successor ||
+        legacyDocuments.has(source)
+      ) {
+        throw new Error("Legacy supersession identity is invalid or duplicated");
+      }
+      legacyDocuments.set(source, item);
+    } catch (error) {
+      findings.push({
+        severity: "error",
+        code: "REGISTRY_REFERENCE_MISSING",
+        location: item.resource,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   const strictDocuments = new Map<string, VerifiedEntry>();
   for (const item of verified) {
     if (item.entry.validation_profile !== "strict-v1") continue;
@@ -662,8 +708,6 @@ export async function inspectTemplateRegistry(
       });
     }
   }
-  const referencePattern =
-    /^[a-z0-9]+(?:-[a-z0-9]+)*:[a-z0-9]+(?:-[a-z0-9]+)*@(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
   for (const [source, item] of strictDocuments) {
     const document = item.value as Record<string, unknown>;
     const dependencies = document.dependencies as unknown[];
@@ -683,7 +727,14 @@ export async function inspectTemplateRegistry(
           });
           continue;
         }
-        if (seen.has(reference) || reference === source || !strictDocuments.has(reference)) {
+        const target = kind === "dependency"
+          ? strictDocuments.get(reference)
+          : strictDocuments.get(reference) ?? legacyDocuments.get(reference);
+        const reciprocalLegacyLink =
+          kind !== "superseded" ||
+          !legacyDocuments.has(reference) ||
+          target?.entry.superseded_by === source;
+        if (seen.has(reference) || reference === source || target === undefined || !reciprocalLegacyLink) {
           findings.push({
             severity: "error",
             code: "REGISTRY_REFERENCE_MISSING",
@@ -707,6 +758,23 @@ export async function inspectTemplateRegistry(
         code: "REGISTRY_REFERENCE_MISSING",
         location: item.resource,
         message: `${source} has invalid superseded_by reference`,
+      });
+    }
+  }
+
+  for (const [source, item] of legacyDocuments) {
+    const successor = String(item.entry.superseded_by);
+    const target = strictDocuments.get(successor);
+    if (
+      target === undefined ||
+      !Array.isArray(target.entry.supersedes) ||
+      !target.entry.supersedes.includes(source)
+    ) {
+      findings.push({
+        severity: "error",
+        code: "REGISTRY_REFERENCE_MISSING",
+        location: item.resource,
+        message: `${source} has an unresolved or non-reciprocal superseded_by reference ${successor}`,
       });
     }
   }
