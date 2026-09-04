@@ -226,6 +226,20 @@ test("validates every entity while bounding returned details", () => {
   assert.equal(decoded.entities.at(-1).entityId, "256");
 });
 
+test("pure decoding rejects a structurally valid frame above the wire buffer limit", () => {
+  const oversized = replicationFrame(
+    Array.from({ length: 5_042 }, (_, index) => entityDelta(BigInt(index + 1), [])),
+  );
+  assert.equal(oversized.length > 65_542, true);
+
+  const decoded = decodeReplicationFrame(oversized);
+
+  assert.equal(decoded.complete, true);
+  assert.equal(decoded.structurallyValid, false);
+  assert.equal(decoded.findings[0].code, "REPLICATION_FRAME_INVALID");
+  assert.equal(decoded.findings[0].offset, 0);
+});
+
 test("inspects a regular replication file with stable integrity evidence", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "uo-replication-file-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

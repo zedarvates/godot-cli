@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { lstat, open, realpath } from "node:fs/promises";
+import path from "node:path";
+
 export const ENTITY_UPDATE_OPCODE = 80;
 export const MAX_REPLICATION_FRAME_BYTES = 65_542;
 export const MAX_REPLICATION_ENTITY_DETAILS = 256;
@@ -188,27 +192,47 @@ function fileFailure(
   return report;
 }
 
-function finalize(result: ReplicationDecodeResult): ReplicationDecodeResult {
-  result.findings.sort((left, right) => {
+function sortFindings(findings: ReplicationFinding[]): ReplicationFinding[] {
+  return findings.sort((left, right) => {
     const byCode = left.code.localeCompare(right.code);
     if (byCode !== 0) return byCode;
     const leftOffset = left.offset ?? Number.MAX_SAFE_INTEGER;
     const rightOffset = right.offset ?? Number.MAX_SAFE_INTEGER;
     return leftOffset - rightOffset || left.message.localeCompare(right.message);
   });
-  if (result.findings.length > MAX_REPLICATION_FINDINGS) {
-    result.findings.length = MAX_REPLICATION_FINDINGS - 1;
-    result.findings.push(finding(
+}
+
+function normalizeFindings(findings: ReplicationFinding[]): {
+  findings: ReplicationFinding[];
+  truncated: boolean;
+} {
+  sortFindings(findings);
+  if (findings.length <= MAX_REPLICATION_FINDINGS) {
+    return { findings, truncated: false };
+  }
+  const sourceChanged = findings.find(
+    (item) => item.code === "REPLICATION_SOURCE_CHANGED",
+  );
+  const retained = findings.filter(
+    (item) =>
+      item.code !== "REPLICATION_FINDINGS_TRUNCATED" &&
+      item !== sourceChanged,
+  );
+  retained.length = MAX_REPLICATION_FINDINGS - 1 - (sourceChanged ? 1 : 0);
+  if (sourceChanged) retained.push(sourceChanged);
+  retained.push(finding(
       "REPLICATION_FINDINGS_TRUNCATED",
       null,
       "Finding limit reached",
-    ));
+  ));
+  return { findings: sortFindings(retained), truncated: true };
+}
+
+function finalize(result: ReplicationDecodeResult): ReplicationDecodeResult {
+  const normalized = normalizeFindings(result.findings);
+  result.findings = normalized.findings;
+  if (normalized.truncated) {
     result.complete = false;
-    result.findings.sort((left, right) =>
-      left.code.localeCompare(right.code) ||
-      (left.offset ?? Number.MAX_SAFE_INTEGER) - (right.offset ?? Number.MAX_SAFE_INTEGER) ||
-      left.message.localeCompare(right.message),
-    );
   }
   result.structurallyValid = result.complete && result.findings.length === 0;
   return result;
@@ -229,6 +253,11 @@ export function decodeReplicationFrame(bytes: Uint8Array): ReplicationDecodeResu
     entities: [],
     findings: [],
   };
+
+  if (bytes.byteLength > MAX_REPLICATION_FRAME_BYTES) {
+    result.findings.push(finding("REPLICATION_FRAME_INVALID", 0, "Frame exceeds the 65,542-byte wire buffer limit"));
+    return finalize(result);
+  }
 
   if (bytes.byteLength < 8) {
     result.findings.push(finding("REPLICATION_FRAME_INVALID", 0, "Frame is shorter than the eight-byte minimum"));
@@ -403,16 +432,10 @@ export async function inspectReplicationFrame(
     ));
   }
 
-  report.findings.sort((left, right) =>
-    left.code.localeCompare(right.code) ||
-    (left.offset ?? Number.MAX_SAFE_INTEGER) - (right.offset ?? Number.MAX_SAFE_INTEGER) ||
-    left.message.localeCompare(right.message),
-  );
-  report.complete = decoded.complete && report.integrity.unchanged;
+  const normalized = normalizeFindings(report.findings);
+  report.findings = normalized.findings;
+  report.complete = decoded.complete && report.integrity.unchanged && !normalized.truncated;
   report.structurallyValid = report.complete && report.findings.length === 0;
   report.status = report.structurallyValid ? "ok" : "error";
   return report;
 }
-import { createHash } from "node:crypto";
-import { lstat, open, realpath } from "node:fs/promises";
-import path from "node:path";
