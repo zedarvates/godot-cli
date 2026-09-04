@@ -229,6 +229,10 @@ function normalizeFindings(findings: ReplicationFinding[]): {
 }
 
 function finalize(result: ReplicationDecodeResult): ReplicationDecodeResult {
+  result.frame.detailedEntities = result.entities.length;
+  result.frame.omittedEntities = result.frame.entityCount === null
+    ? 0
+    : Math.max(0, result.frame.entityCount - result.entities.length);
   const normalized = normalizeFindings(result.findings);
   result.findings = normalized.findings;
   if (normalized.truncated) {

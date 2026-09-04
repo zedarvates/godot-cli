@@ -147,6 +147,18 @@ test("rejects invalid outer frames at exact byte offsets", () => {
   }
 });
 
+test("partial decoding keeps entity detail counters internally consistent", () => {
+  const countMismatch = Buffer.from(canonicalFrame);
+  countMismatch.writeUInt16BE(2, 6);
+
+  const decoded = decodeReplicationFrame(countMismatch);
+
+  assert.equal(decoded.structurallyValid, false);
+  assert.equal(decoded.entities.length, 1);
+  assert.equal(decoded.frame.detailedEntities, 1);
+  assert.equal(decoded.frame.omittedEntities, 1);
+});
+
 test("rejects invalid delta sizes, field counts, and zero entity identity", () => {
   const zeroId = Buffer.from(canonicalFrame);
   zeroId.fill(0, 12, 20);
