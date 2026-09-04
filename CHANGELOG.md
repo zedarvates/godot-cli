@@ -22,6 +22,9 @@ pre-release versions until the public API and operational boundary are stable.
 - Read-only `template registry inspect <root>` for bounded catalog v2, profile,
   contract, schema-link, exact SHA-256, strict-content, and `godot-vr`
   compatibility-evidence inspection.
+- `network replication inspect <frame.bin>` for bounded local decoding of one
+  complete Zig2 `entity_update=80` frame, including exact envelope/delta/field
+  validation, precision-safe entity IDs, and source-integrity evidence.
 
 ### Security
 
@@ -45,6 +48,9 @@ pre-release versions until the public API and operational boundary are stable.
   `spec_checksum`, detect duplicate JSON keys, validate, instantiate, migrate,
   run registry Python, start Godot, access the network, or prove runtime
   compatibility.
+- Replication inspection does not connect, capture, replay, authenticate,
+  interpolate, reconcile, apply state to Godot, or prove live networking,
+  delivery, latency, rendering, VR, or production behavior.
 
 ## 0.1.0-uo.7 — 2026-08-14
 

@@ -33,6 +33,7 @@ import { validateAsset } from "./asset-validation.js";
 import { inspectTemplateRegistry } from "./template-registry-inspection.js";
 import { listTestProfiles, runTestProfile } from "./test-runner.js";
 import { inspectModManifest } from "./mod-manifest-inspection.js";
+import { inspectReplicationFrame } from "./network-replication-inspection.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -135,6 +136,9 @@ PROJECT TEST PROFILES (local manifest; no shell)
 
 MOD MANIFEST (local structural inspection only)
   mod manifest inspect <manifest.json>      Check addon-manifest v1 without trust or activation
+
+NETWORK REPLICATION (captured local frame only)
+  network replication inspect <frame.bin>  Check one entity_update=80 frame without connecting
 
 COMPATIBILITY
   ping                                      Probe authenticated engine readiness once
@@ -279,6 +283,28 @@ modManifestCommands
   .action(async (manifest: string) => {
     try {
       const report = await inspectModManifest({ manifest });
+      printLocalResult(report);
+      if (report.status !== "ok") process.exitCode = 1;
+    } catch (error) {
+      reportLocalError(error);
+    }
+  });
+
+const networkCommands = program
+  .command("network")
+  .description("Inspect captured Ultimate Odycer wire data without connecting");
+
+const replicationCommands = networkCommands
+  .command("replication")
+  .description("Inspect entity_update replication frames");
+
+replicationCommands
+  .command("inspect")
+  .description("Validate one captured entity_update=80 binary frame")
+  .argument("<frame>", "Explicit local .bin frame")
+  .action(async (frame: string) => {
+    try {
+      const report = await inspectReplicationFrame({ frame });
       printLocalResult(report);
       if (report.status !== "ok") process.exitCode = 1;
     } catch (error) {

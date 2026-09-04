@@ -242,6 +242,28 @@ normalization; the report makes no object-key uniqueness claim. Producers that
 require this stricter property must reject duplicates before emitting a
 manifest.
 
+## Replication frame inspection boundary
+
+`uo-godot-cli network replication inspect <frame.bin>` reads one captured
+`entity_update=80` frame locally. It requires a regular non-symbolic `.bin`
+file, rejects filesystem aliases, and caps the complete source at 65,542 bytes
+both before and during handle-based reading. SHA-256, type, and size snapshots
+must agree before and after parsing.
+
+The parser requires exact big-endian frame, batch, delta, and field boundaries.
+Entity IDs remain decimal strings so `u64` precision is not lost. Only the
+seven fields currently emitted by Zig2 are accepted in canonical order; float
+NaN and infinities fail closed and never appear as misleading JSON numbers.
+All entities are validated even though detailed output stops at 256, and
+findings stop at 128 with an explicit incomplete marker.
+
+This command opens no socket and exposes no connect, listen, capture, replay,
+send, interpolate, or apply operation. It does not authenticate bytes, prove
+origin/freshness/delivery, authorize entities, apply anti-cheat rules, retain
+delta history, update Godot components, or establish live EntitySync. The
+optional Zig build step exists only in tests and cannot affect production
+reports.
+
 ## Remaining limitations
 
 The automated suite includes Node protocol controls, source invariants, real
