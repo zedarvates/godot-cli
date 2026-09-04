@@ -36,6 +36,7 @@ The executable is named **`uo-godot-cli`** to avoid colliding with the unrelated
 | Audit a project before touching it | `project preflight` | No | No |
 | Compare CLI and `godot_ai` capabilities | `project compatibility` | No | Only with `--live` |
 | Inspect one addon-manifest v1 file | `mod manifest inspect` | No | No |
+| Inspect one captured replication frame | `network replication inspect` | No | No |
 | Start and own one local runtime | `runtime start` | Yes | Yes |
 | Prove one scene and stop cleanly | `scene validate` | Yes | Yes |
 | Run an allowlisted project test | `test list`, then `test run` | Runner-dependent | No runtime token |
@@ -226,6 +227,39 @@ Every report deliberately returns `trustVerdict: "not_checked"`,
 `serverAuthorityRequired: true`. The command does not read a mod package or
 trust store, verify Ed25519, install, activate, migrate, roll back, sandbox, or
 execute mod code. Only `zig-server-v2` can establish trust and lifecycle state.
+
+### Network replication frame inspection
+
+```bash
+uo-godot-cli network replication inspect /path/to/entity-update.bin
+```
+
+This tokenless local command validates one complete Zig2 `entity_update=80`
+frame: the big-endian length/opcode envelope, entity count, delta sizes,
+precision-safe `u64` IDs, field order, and final byte position. Input is one
+regular non-symbolic `.bin` file capped at 65,542 bytes and fingerprinted before
+and after inspection. Every entity is checked, while JSON details are capped at
+256 entities.
+
+| ID | Field | Wire value |
+|---:|---|---|
+| 1 | `pos_x` | finite `f32` BE |
+| 2 | `pos_y` | finite `f32` BE |
+| 3 | `pos_z` | finite `f32` BE |
+| 4 | `vel_x` | finite `f32` BE |
+| 6 | `vel_z` | finite `f32` BE |
+| 7 | `rot_y` | finite `f32` BE |
+| 10 | `health` | `u32` BE |
+
+Unknown, duplicate, out-of-order, non-finite, truncated, oversized, or trailing
+data fails closed. A successful report proves only structural compatibility of
+the captured bytes. It does not connect, listen, capture, replay, authenticate,
+interpolate, reconcile, mutate Godot, or prove live EntitySync, ownership,
+anti-cheat acceptance, delivery, latency, rendering, VR, or production behavior.
+
+When `UO_ZIG_SERVER_ROOT` is configured during tests, the optional parity gate
+runs `zig build test-replication --summary all` through the authoritative
+`build.zig`; production inspection never runs Zig or parses Zig source text.
 
 ### Managed runtime
 
@@ -487,6 +521,7 @@ Only loopback hosts are accepted. `localhost` is resolved and revalidated before
 
 | Gate | Result | Proof boundary |
 |---|---|---|
+| Replication inspection merged local gate, 2026-09-04 | **155 passed, 0 failed, 0 skipped** | Full local suite with Godot 4.7-dev5, FoveaCore, 6,382-file template registry, addon trust parity, and authoritative `test-replication` 5/5. This proves captured-frame structure only, not authentication, sockets, delivery, interpolation, Godot application, live EntitySync, or production networking. |
 | Asset + Template + Mod merged integration gate, 2026-08-29 | **139 passed, 0 failed, 0 skipped** | Real Godot 4.7-dev5 disposable asset import, FoveaCore bridge, 6,382-file template registry inspection, strict-to-legacy supersession graph, Zig addon-manifest/trust-store parity, package consumer, runtime and scene validation. This remains local development evidence, not GPU, VRAM, visual-quality, collision-quality, performance, production, or OpenXR proof. |
 | Asset validation + Godot 4.7-dev5 local gate, 2026-08-22 | **98 passed, 0 failed, 1 skipped** out of 99 | Static glTF/GLB, dependency, policy, package CLI, real disposable mesh import, collision-required rejection, and canonical source fingerprints. Fovea remained explicitly skipped; this is not GPU, VRAM, visual-quality, collision-quality, performance, or OpenXR proof. |
 | Template registry inspection + real registry, 2026-08-23 | **75 passed, 0 failed, 14 skipped** out of 89 | Installed CLI plus two deterministic read-only passes over 4,064 catalogued files; 4,063 legacy, one common strict schema, zero strict templates, integrity ready and consumer not ready. Godot/Fovea tests remained explicitly skipped; inspection is not schema validation, instantiation, migration, or runtime compatibility proof. |

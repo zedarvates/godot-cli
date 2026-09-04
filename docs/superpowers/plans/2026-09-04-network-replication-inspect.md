@@ -437,12 +437,14 @@ Capture `git status --porcelain --` for only those paths, then launch directly
 without a shell:
 
 ```text
-zig test src/network/replication.zig
+zig build test-replication --summary all
 ```
 
-Use a 60-second timeout and 1 MiB combined-output limit. Require exit zero, the
-canonical framing test name, the final pass signal, no retained child, and
-identical scoped Git status. Do not feed parity into production reports.
+Use a 60-second timeout and 1 MiB combined-output limit. Require exit zero,
+`5/5 tests passed`, `test-replication success`, no retained child, and identical
+scoped Git status. The build step is mandatory because direct `zig test` lacks
+the `ecs` and `types` module imports configured by `build.zig`. Do not feed
+parity into production reports.
 
 - [ ] **Step 2: Update user and security documentation**
 
@@ -478,7 +480,7 @@ Keep checkup infrastructure warnings separate from feature correctness.
 - [ ] **Step 5: Re-run authoritative Zig parity separately**
 
 ```powershell
-rtk zig test src/network/replication.zig
+rtk zig build test-replication --summary all
 rtk git status --short -- src/network/replication.zig src/core/protocol_fields.zig src/networking/handlers/entity.zig src/main.zig
 ```
 

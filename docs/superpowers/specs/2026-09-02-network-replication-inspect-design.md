@@ -222,11 +222,13 @@ root, requires the exact authoritative files, snapshots their scoped Git
 status, and directly runs:
 
 ```text
-zig test src/network/replication.zig
+zig build test-replication --summary all
 ```
 
-The child is test-only, shell-free, capped at 60 seconds and 1 MiB of combined
-output. It must leave the authoritative files unchanged. Its success is
+The build step is required because `replication.zig` imports the `ecs` and
+`types` modules configured by `build.zig`; direct `zig test` is not a valid
+standalone gate. The child is test-only, shell-free, capped at 60 seconds and
+1 MiB of combined output. It must leave the authoritative files unchanged. Its success is
 reported separately and does not turn local frame inspection into live network
 proof.
 
