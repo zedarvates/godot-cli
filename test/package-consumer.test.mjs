@@ -155,6 +155,31 @@ test("packed CLI installs and manages its addon outside the source tree", async 
   assert.equal(modReport.serverAuthorityRequired, true);
   assert.deepEqual(await fs.readFile(addonManifestFile), addonManifestBytes);
 
+  const replicationFrameFile = path.join(temporaryRoot, "entity-update.bin");
+  const replicationFrameBytes = Buffer.from([
+    0x00, 0x00, 0x00, 0x25, 0x00, 0x50, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x1d,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x04,
+    0x01, 0x3f, 0x80, 0x00, 0x00,
+    0x02, 0xc0, 0x00, 0x00, 0x00,
+    0x03, 0x40, 0x60, 0x00, 0x00,
+    0x0a, 0x00, 0x00, 0x00, 0x64,
+  ]);
+  await fs.writeFile(replicationFrameFile, replicationFrameBytes);
+  const replicationReport = JSON.parse(
+    runInstalledCli(
+      cliPath,
+      ["network", "replication", "inspect", replicationFrameFile],
+      consumer
+    )
+  );
+  assert.equal(replicationReport.status, "ok");
+  assert.equal(replicationReport.entities[0].entityId, "1");
+  assert.equal(replicationReport.entities[0].fields.at(-1).value, 100);
+  assert.match(replicationReport.integrity.sha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(await fs.readFile(replicationFrameFile), replicationFrameBytes);
+
   const projectDefinition = `config_version=5
 
 [application]

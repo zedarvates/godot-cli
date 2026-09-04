@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -59,6 +60,24 @@ function replicationFrame(deltas) {
 
 function findingCodes(decoded) {
   return decoded.findings.map((finding) => finding.code);
+}
+
+function runCli(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.resolve("dist/cli.js"), ...args], {
+      cwd: path.resolve("."),
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+  });
 }
 
 test("decodes the canonical entity_update frame without losing wire values", () => {
@@ -296,4 +315,42 @@ test("a stable malformed frame is invalid but completely inspected", async (t) =
   assert.equal(report.integrity.unchanged, true);
   assert.equal(findingCodes(report).includes("REPLICATION_OPCODE_INVALID"), true);
   assert.deepEqual(await fs.readFile(frame), malformed);
+});
+
+test("replication inspect CLI emits JSON and preserves exit status and bytes", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "uo-replication-cli-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const frame = path.join(root, "capture.bin");
+  await fs.writeFile(frame, canonicalFrame);
+
+  const success = await runCli(["network", "replication", "inspect", frame]);
+  assert.equal(success.code, 0);
+  assert.equal(success.stderr, "");
+  const report = JSON.parse(success.stdout);
+  assert.equal(report.status, "ok");
+  assert.equal(report.contract.opcode, 80);
+  assert.equal(report.entities[0].entityId, "1");
+  assert.equal(report.entities[0].fields.at(-1).value, 100);
+  assert.deepEqual(await fs.readFile(frame), canonicalFrame);
+
+  const wrongOpcode = Buffer.from(canonicalFrame);
+  wrongOpcode.writeUInt16BE(81, 4);
+  await fs.writeFile(frame, wrongOpcode);
+  const failure = await runCli(["network", "replication", "inspect", frame]);
+  assert.equal(failure.code, 1);
+  assert.equal(failure.stderr, "");
+  assert.equal(JSON.parse(failure.stdout).findings[0].code, "REPLICATION_OPCODE_INVALID");
+});
+
+test("network replication exposes inspect but no live or mutation commands", async () => {
+  const help = await runCli(["network", "replication", "--help"]);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /Usage: uo-godot-cli network replication/);
+  assert.match(help.stdout, /inspect/);
+  for (const forbidden of [
+    "connect", "listen", "capture", "replay", "send", "interpolate", "apply",
+  ]) {
+    const result = await runCli(["network", "replication", forbidden]);
+    assert.notEqual(result.code, 0, forbidden);
+  }
 });
