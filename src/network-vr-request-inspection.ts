@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { lstat, open, realpath } from "node:fs/promises";
+import path from "node:path";
+
 export const VR_GRAB_OPCODE = 128;
 export const VR_RELEASE_OPCODE = 129;
 export const VR_GRAB_FRAME_BYTES = 15;
@@ -313,6 +317,3 @@ export async function inspectVrRequestFrame(
   report.status = report.structurallyValid ? "ok" : "error";
   return report;
 }
-import { createHash } from "node:crypto";
-import { lstat, open, realpath } from "node:fs/promises";
-import path from "node:path";

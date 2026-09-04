@@ -264,6 +264,26 @@ delta history, update Godot components, or establish live EntitySync. The
 optional Zig build step exists only in tests and cannot affect production
 reports.
 
+## VR request inspection boundary
+
+`uo-godot-cli network vr-request inspect <frame.bin>` reads one complete
+client-to-server VR grab or release frame. It requires a regular non-symbolic
+`.bin` source, rejects filesystem aliases, caps the source at 38 bytes during
+handle-based reading, and requires matching SHA-256/size/type evidence before
+and after decoding.
+
+The parser accepts only opcode `128` with a nine-byte grab payload or opcode
+`129` with a 32-byte release payload. Hand values are limited to zero/one,
+`u64` object IDs remain precision-safe decimal strings, and six release
+velocity floats must be finite. Server broadcast payloads using the same
+opcodes are rejected by exact length.
+
+`serverValidationRequired` always remains true. The inspector does not prove
+authentication, object existence, ownership, reach, grabbed state, mutable
+physics eligibility, server velocity clamps, or anti-cheat acceptance. It opens
+no socket and implements no pose, voice, locomotion, capture, replay, send,
+broadcast, or Godot/runtime mutation path.
+
 ## Remaining limitations
 
 The automated suite includes Node protocol controls, source invariants, real

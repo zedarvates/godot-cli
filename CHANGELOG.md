@@ -25,6 +25,9 @@ pre-release versions until the public API and operational boundary are stable.
 - `network replication inspect <frame.bin>` for bounded local decoding of one
   complete Zig2 `entity_update=80` frame, including exact envelope/delta/field
   validation, precision-safe entity IDs, and source-integrity evidence.
+- `network vr-request inspect <frame.bin>` for exact local decoding of
+  client-to-server VR grab `128` and release `129` frames with finite
+  big-endian velocity checks and immutable server-validation requirements.
 
 ### Security
 
@@ -51,6 +54,9 @@ pre-release versions until the public API and operational boundary are stable.
 - Replication inspection does not connect, capture, replay, authenticate,
   interpolate, reconcile, apply state to Godot, or prove live networking,
   delivery, latency, rendering, VR, or production behavior.
+- VR request inspection excludes server broadcasts, pose, voice, locomotion,
+  object ownership/state decisions, velocity clamps, anti-cheat acceptance,
+  sockets, replay, and Godot mutation.
 
 ## 0.1.0-uo.7 — 2026-08-14
 
