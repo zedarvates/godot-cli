@@ -40,6 +40,26 @@ export interface ReplicationDecodeResult {
   findings: ReplicationFinding[];
 }
 
+export interface ReplicationSourceSnapshot {
+  regular: boolean;
+  bytes: number;
+  sha256: string;
+}
+
+export interface ReplicationInspectionReport extends ReplicationDecodeResult {
+  status: "ok" | "error";
+  frameFile: string;
+  contract: {
+    authority: "zig-server-v2";
+    messageType: "entity_update";
+    opcode: 80;
+    byteOrder: "big-endian";
+    maxFrameBytes: 65_542;
+  };
+  integrity: ReplicationSourceSnapshot & { unchanged: boolean };
+  boundaries: string[];
+}
+
 type FieldContract = {
   name: ReplicationField["name"];
   kind: ReplicationField["kind"];
@@ -66,6 +86,106 @@ function finding(
 
 function rawHex(bytes: Uint8Array, offset: number): string {
   return Buffer.from(bytes.subarray(offset, offset + 4)).toString("hex");
+}
+
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function comparablePath(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+export function replicationSourceSnapshotsMatch(
+  initial: ReplicationSourceSnapshot,
+  final: ReplicationSourceSnapshot,
+): boolean {
+  return initial.regular &&
+    final.regular &&
+    initial.bytes === final.bytes &&
+    initial.sha256 === final.sha256;
+}
+
+async function readBoundedFrame(file: string): Promise<{
+  bytes: Buffer;
+  snapshot: ReplicationSourceSnapshot;
+}> {
+  const handle = await open(file, "r");
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error("Replication frame is not a regular file");
+    if (stat.size > MAX_REPLICATION_FRAME_BYTES) {
+      throw new Error("Replication frame exceeds 65,542 bytes");
+    }
+    const buffer = Buffer.allocUnsafe(MAX_REPLICATION_FRAME_BYTES + 1);
+    let total = 0;
+    while (total <= MAX_REPLICATION_FRAME_BYTES) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        total,
+        buffer.length - total,
+        null,
+      );
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total > MAX_REPLICATION_FRAME_BYTES) {
+      throw new Error("Replication frame exceeds 65,542 bytes");
+    }
+    const bytes = Buffer.from(buffer.subarray(0, total));
+    return {
+      bytes,
+      snapshot: { regular: true, bytes: total, sha256: sha256(bytes) },
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+function emptyInspection(frameFile: string): ReplicationInspectionReport {
+  return {
+    status: "error",
+    complete: false,
+    structurallyValid: false,
+    frameFile,
+    contract: {
+      authority: "zig-server-v2",
+      messageType: "entity_update",
+      opcode: 80,
+      byteOrder: "big-endian",
+      maxFrameBytes: 65_542,
+    },
+    frame: {
+      bytes: 0,
+      declaredLength: null,
+      payloadBytes: null,
+      entityCount: null,
+      detailedEntities: 0,
+      omittedEntities: 0,
+    },
+    entities: [],
+    findings: [],
+    integrity: { regular: false, bytes: 0, sha256: "", unchanged: false },
+    boundaries: [
+      "Inspects one captured entity_update=80 frame only.",
+      "Does not connect, listen, capture, replay, or send network traffic.",
+      "Does not authenticate or prove packet origin, freshness, or delivery.",
+      "Does not interpolate, predict, reconcile, or apply entity state.",
+      "Does not create entities, components, scenes, or Godot mutations.",
+      "Does not prove authorization, ownership, anti-cheat acceptance, or gameplay validity.",
+      "Does not prove rendering, latency, VR, GPU, or production behavior.",
+    ],
+  };
+}
+
+function fileFailure(
+  report: ReplicationInspectionReport,
+  code: string,
+  message: string,
+): ReplicationInspectionReport {
+  report.findings = [finding(code, null, message)];
+  return report;
 }
 
 function finalize(result: ReplicationDecodeResult): ReplicationDecodeResult {
@@ -214,3 +334,85 @@ export function decodeReplicationFrame(bytes: Uint8Array): ReplicationDecodeResu
   result.frame.omittedEntities = entityCount - result.entities.length;
   return finalize(result);
 }
+
+export async function inspectReplicationFrame(
+  options: { frame: string },
+): Promise<ReplicationInspectionReport> {
+  const requested = path.resolve(options.frame);
+  const report = emptyInspection(requested);
+  if (path.extname(requested).toLowerCase() !== ".bin") {
+    return fileFailure(report, "REPLICATION_FILE_INVALID", "Frame must be an explicit .bin file");
+  }
+
+  let canonical: string;
+  let initial: Awaited<ReturnType<typeof readBoundedFrame>>;
+  try {
+    const stat = await lstat(requested);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      return fileFailure(report, "REPLICATION_FILE_INVALID", "Frame must be a regular non-symbolic file");
+    }
+    if (stat.size > MAX_REPLICATION_FRAME_BYTES) {
+      return fileFailure(report, "REPLICATION_FILE_TOO_LARGE", "Frame exceeds 65,542 bytes");
+    }
+    canonical = await realpath(requested);
+    if (comparablePath(canonical) !== comparablePath(requested)) {
+      return fileFailure(report, "REPLICATION_FILE_INVALID", "Frame path traverses a symbolic filesystem alias");
+    }
+    initial = await readBoundedFrame(canonical);
+    if (initial.snapshot.bytes !== stat.size) {
+      return fileFailure(report, "REPLICATION_SOURCE_CHANGED", "Frame changed during initial read");
+    }
+  } catch (error) {
+    return fileFailure(
+      report,
+      "REPLICATION_FILE_UNREADABLE",
+      error instanceof Error ? error.message : "Frame cannot be read",
+    );
+  }
+
+  report.frameFile = canonical;
+  report.integrity = { ...initial.snapshot, unchanged: false };
+  const decoded = decodeReplicationFrame(initial.bytes);
+  report.frame = decoded.frame;
+  report.entities = decoded.entities;
+  report.findings = decoded.findings;
+
+  try {
+    const finalPathStat = await lstat(canonical);
+    const final = await readBoundedFrame(canonical);
+    const finalSnapshot = {
+      ...final.snapshot,
+      regular: finalPathStat.isFile() && !finalPathStat.isSymbolicLink(),
+    };
+    report.integrity.unchanged = replicationSourceSnapshotsMatch(
+      initial.snapshot,
+      finalSnapshot,
+    );
+    if (!report.integrity.unchanged) {
+      report.findings.push(finding(
+        "REPLICATION_SOURCE_CHANGED",
+        null,
+        "Frame changed during inspection",
+      ));
+    }
+  } catch {
+    report.findings.push(finding(
+      "REPLICATION_SOURCE_CHANGED",
+      null,
+      "Frame became unreadable during inspection",
+    ));
+  }
+
+  report.findings.sort((left, right) =>
+    left.code.localeCompare(right.code) ||
+    (left.offset ?? Number.MAX_SAFE_INTEGER) - (right.offset ?? Number.MAX_SAFE_INTEGER) ||
+    left.message.localeCompare(right.message),
+  );
+  report.complete = decoded.complete && report.integrity.unchanged;
+  report.structurallyValid = report.complete && report.findings.length === 0;
+  report.status = report.structurallyValid ? "ok" : "error";
+  return report;
+}
+import { createHash } from "node:crypto";
+import { lstat, open, realpath } from "node:fs/promises";
+import path from "node:path";

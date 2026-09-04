@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
-import { decodeReplicationFrame } from "../dist/network-replication-inspection.js";
+import {
+  decodeReplicationFrame,
+  inspectReplicationFrame,
+  replicationSourceSnapshotsMatch,
+} from "../dist/network-replication-inspection.js";
 
 const canonicalFrame = Buffer.from([
   0x00, 0x00, 0x00, 0x25,
@@ -198,4 +205,95 @@ test("validates every entity while bounding returned details", () => {
   assert.equal(decoded.frame.omittedEntities, 1);
   assert.equal(decoded.entities.length, 256);
   assert.equal(decoded.entities.at(-1).entityId, "256");
+});
+
+test("inspects a regular replication file with stable integrity evidence", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "uo-replication-file-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const frame = path.join(root, "capture.bin");
+  await fs.writeFile(frame, canonicalFrame);
+
+  const report = await inspectReplicationFrame({ frame });
+
+  assert.equal(report.status, "ok");
+  assert.equal(report.complete, true);
+  assert.equal(report.structurallyValid, true);
+  assert.equal(report.frameFile, await fs.realpath(frame));
+  assert.deepEqual(report.contract, {
+    authority: "zig-server-v2",
+    messageType: "entity_update",
+    opcode: 80,
+    byteOrder: "big-endian",
+    maxFrameBytes: 65542,
+  });
+  assert.equal(report.integrity.bytes, 41);
+  assert.match(report.integrity.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(report.integrity.unchanged, true);
+  assert.equal(report.boundaries.length > 6, true);
+  assert.deepEqual(await fs.readFile(frame), canonicalFrame);
+});
+
+test("rejects unreadable, non-bin, directory, symbolic, and oversized sources", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "uo-replication-files-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const missing = await inspectReplicationFrame({ frame: path.join(root, "missing.bin") });
+  assert.equal(findingCodes(missing).includes("REPLICATION_FILE_UNREADABLE"), true);
+
+  const wrongExtension = path.join(root, "capture.dat");
+  await fs.writeFile(wrongExtension, canonicalFrame);
+  const wrong = await inspectReplicationFrame({ frame: wrongExtension });
+  assert.equal(findingCodes(wrong).includes("REPLICATION_FILE_INVALID"), true);
+
+  const directory = path.join(root, "directory.bin");
+  await fs.mkdir(directory);
+  const directoryReport = await inspectReplicationFrame({ frame: directory });
+  assert.equal(findingCodes(directoryReport).includes("REPLICATION_FILE_INVALID"), true);
+
+  const target = path.join(root, "target.bin");
+  const link = path.join(root, "link.bin");
+  await fs.writeFile(target, canonicalFrame);
+  try {
+    await fs.symlink(target, link, "file");
+    const linked = await inspectReplicationFrame({ frame: link });
+    assert.equal(findingCodes(linked).includes("REPLICATION_FILE_INVALID"), true);
+  } catch (error) {
+    if (error?.code !== "EPERM") throw error;
+  }
+
+  const oversized = path.join(root, "oversized.bin");
+  const handle = await fs.open(oversized, "w");
+  try {
+    await handle.truncate(65_543);
+  } finally {
+    await handle.close();
+  }
+  const large = await inspectReplicationFrame({ frame: oversized });
+  assert.equal(findingCodes(large).includes("REPLICATION_FILE_TOO_LARGE"), true);
+});
+
+test("source snapshot comparison fails on type, size, or hash drift", () => {
+  const initial = { regular: true, bytes: 41, sha256: "a".repeat(64) };
+  assert.equal(replicationSourceSnapshotsMatch(initial, { ...initial }), true);
+  assert.equal(replicationSourceSnapshotsMatch(initial, { ...initial, regular: false }), false);
+  assert.equal(replicationSourceSnapshotsMatch(initial, { ...initial, bytes: 42 }), false);
+  assert.equal(replicationSourceSnapshotsMatch(initial, { ...initial, sha256: "b".repeat(64) }), false);
+});
+
+test("a stable malformed frame is invalid but completely inspected", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "uo-replication-invalid-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const frame = path.join(root, "capture.bin");
+  const malformed = Buffer.from(canonicalFrame);
+  malformed.writeUInt16BE(81, 4);
+  await fs.writeFile(frame, malformed);
+
+  const report = await inspectReplicationFrame({ frame });
+
+  assert.equal(report.status, "error");
+  assert.equal(report.complete, true);
+  assert.equal(report.structurallyValid, false);
+  assert.equal(report.integrity.unchanged, true);
+  assert.equal(findingCodes(report).includes("REPLICATION_OPCODE_INVALID"), true);
+  assert.deepEqual(await fs.readFile(frame), malformed);
 });
