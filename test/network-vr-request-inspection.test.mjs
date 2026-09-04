@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,6 +28,24 @@ const releaseFrame = Buffer.from([
   0x40, 0xb0, 0x00, 0x00,
   0xc0, 0xc8, 0x00, 0x00,
 ]);
+
+function runCli(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.resolve("dist/cli.js"), ...args], {
+      cwd: path.resolve("."),
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
 
 test("decodes the authoritative right-hand VR grab request", () => {
   const decoded = decodeVrRequestFrame(grabFrame);
@@ -232,4 +251,52 @@ test("a stable malformed VR frame is invalid but completely inspected", async (t
   assert.equal(report.integrity.unchanged, true);
   assert.equal(report.findings[0].code, "VR_REQUEST_HAND_INVALID");
   assert.deepEqual(await fs.readFile(frame), invalid);
+});
+
+test("VR request inspect CLI emits JSON and preserves status and bytes", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "uo-vr-request-cli-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const frame = path.join(root, "request.bin");
+
+  await fs.writeFile(frame, grabFrame);
+  const grab = await runCli(["network", "vr-request", "inspect", frame]);
+  assert.equal(grab.code, 0);
+  assert.equal(grab.stderr, "");
+  const grabReport = JSON.parse(grab.stdout);
+  assert.equal(grabReport.status, "ok");
+  assert.equal(grabReport.request.objectId, "72623859790382856");
+  assert.equal(grabReport.request.hand, "right");
+  assert.equal(grabReport.serverValidationRequired, true);
+  assert.deepEqual(await fs.readFile(frame), grabFrame);
+
+  await fs.writeFile(frame, releaseFrame);
+  const release = await runCli(["network", "vr-request", "inspect", frame]);
+  assert.equal(release.code, 0);
+  assert.equal(release.stderr, "");
+  assert.deepEqual(JSON.parse(release.stdout).request.angularVelocity, {
+    x: -4,
+    y: 5.5,
+    z: -6.25,
+  });
+
+  const invalid = Buffer.from(grabFrame);
+  invalid[14] = 2;
+  await fs.writeFile(frame, invalid);
+  const failure = await runCli(["network", "vr-request", "inspect", frame]);
+  assert.equal(failure.code, 1);
+  assert.equal(failure.stderr, "");
+  assert.equal(JSON.parse(failure.stdout).findings[0].code, "VR_REQUEST_HAND_INVALID");
+});
+
+test("network VR request exposes inspect only", async () => {
+  const help = await runCli(["network", "vr-request", "--help"]);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /Usage: uo-godot-cli network vr-request/);
+  assert.match(help.stdout, /inspect/);
+  for (const forbidden of [
+    "broadcast", "pose", "voice", "locomotion", "connect", "replay", "send", "apply",
+  ]) {
+    const result = await runCli(["network", "vr-request", forbidden]);
+    assert.notEqual(result.code, 0, forbidden);
+  }
 });
