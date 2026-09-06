@@ -32,6 +32,9 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Added
 
+- `template validate --registry-max-read-bytes` lowers the registry inspection
+  phase's read ceiling and reports `registryReadBudget`, including rejected bytes.
+
 - Extend `--expected-catalog-sha256` to `template validate`, checking the pin
   before referenced files and reporting `catalogPinVerified` separately from validity.
 

@@ -180,12 +180,13 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
     return validationFailure(options.template, "TEMPLATE_CATALOG_MISMATCH",
       "Registry catalog SHA-256 does not match expected digest");
   }
-  const inspection = await inspectTemplateRegistry({ root, expectedCatalogSha256: pin });
+  const inspection = await inspectTemplateRegistry({ root, expectedCatalogSha256: pin,
+    maxReadBytes: options.registryMaxReadBytes });
   if (!inspection.complete || !inspection.integrityReady || !inspection.strictContentReady) {
     const reason = inspection.findings.find(finding => finding.severity === "error")?.message
       ?? inspection.reasons.join(" ");
-    return validationFailure(options.template, "TEMPLATE_REGISTRY_NOT_READY",
-      `Registry integrity and strict content are required: ${reason}`);
+    return { ...validationFailure(options.template, "TEMPLATE_REGISTRY_NOT_READY",
+      `Registry integrity and strict content are required: ${reason}`), registryReadBudget: inspection.readBudget };
   }
   const entries = catalog.value.entries as ObjectValue[];
   const entry = entries.find(e => e.file === options.template);
@@ -248,6 +249,7 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
   const valid = findings.length === 0;
   return { status: valid ? "ok" : "error", valid, complete: true, template: options.template,
     catalogPinVerified: pin !== undefined,
+    registryReadBudget: inspection.readBudget,
     consumerReady: valid && inspection.consumerReady && doc.compatibility.some((c: ObjectValue) => c.consumer === "godot-vr"), godotValidation: "not_run",
     integrity: { unchanged: true, files: snapshots.map(({ resource, sha256 }) => ({ resource, sha256 })) }, findings };
 }

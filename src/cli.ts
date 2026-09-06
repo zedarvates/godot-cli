@@ -654,10 +654,12 @@ templateCommands
   .argument("<template>", "Exact registry-relative templates/.../template.json path")
   .requiredOption("--registry <root>", "Explicit local registry root")
   .option("--expected-catalog-sha256 <digest>", "Require the reviewed catalog SHA-256 for validation")
-  .action(async (template: string, options: { registry: string; expectedCatalogSha256?: string }) => {
+  .option("--registry-max-read-bytes <bytes>", "Lower the referenced-file budget of registry inspection (maximum 536870912)")
+  .action(async (template: string, options: { registry: string; expectedCatalogSha256?: string; registryMaxReadBytes?: string }) => {
     try {
       const report = await validateTemplate({ root: options.registry, template,
-        expectedCatalogSha256: options.expectedCatalogSha256 });
+        expectedCatalogSha256: options.expectedCatalogSha256,
+        registryMaxReadBytes: options.registryMaxReadBytes === undefined ? undefined : Number(options.registryMaxReadBytes) });
       printLocalResult(report);
       if (!report.valid || !report.complete) process.exitCode = 1;
     } catch (error) { reportLocalError(error); }
