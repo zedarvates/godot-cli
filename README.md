@@ -422,6 +422,14 @@ reject duplicate decoded object keys (including escaped aliases), and handle
 short reads without dropping bytes. This is snapshot evidence,
 not a filesystem transaction or a guarantee against changes after inspection.
 
+`--max-read-bytes <bytes>` can lower the default 536,870,912-byte total budget
+for referenced files. Bytes count as soon as they are read, including rejected
+JSON and checksum mismatches; the catalog retains its separate 16 MiB cap.
+`readBudget` reports the limit, consumed bytes and whether the next read could
+not fit. Such a stop returns a failing exit status and false readiness. Reaching
+the exact limit on the final file is allowed. Counts in an incomplete report
+describe only entries processed before the stop.
+
 Readiness is deliberately layered. `integrityReady` means the bounded
 inspection completed without error. `strictContentReady` additionally requires
 at least one verified strict family schema and linked `strict-v1` template.
