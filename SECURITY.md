@@ -31,6 +31,9 @@ specs support only original integer tokens in JavaScript's exact safe-integer
 range. Decimals, exponent notation and larger integers in the selected template
 are rejected before checksum evaluation; number-looking strings are unaffected.
 This prevents rounded or type-erased values from passing a JavaScript-only digest.
+Loaded schemas enforce the same numeric-token restriction before Ajv evaluation,
+including numeric annotations and constants. A source bound such as
+`0.99999999999999999` must not silently become `1` and admit an unintended value.
 
 ### Runtime defaults
 
