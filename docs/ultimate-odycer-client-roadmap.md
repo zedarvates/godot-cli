@@ -2,7 +2,7 @@
 
 This document maps the ten original audit areas to the development CLI and
 the systems that must supply the remaining runtime behavior. It describes
-the code integrated through PR #11 (`83d5bf4`). Proposed gates below are not
+the current CLI, including local strict template validation. Proposed gates below are not
 implemented commands or evidence of a working VR MMO client.
 
 ## Responsibilities
@@ -22,7 +22,7 @@ implementations into this public tooling repository.
 | Zig2 networking | Local `network replication inspect` for `entity_update=80`; `network vr-request inspect` for client grab/release frames; optional authoritative Zig parity tests | A client adapter must prove authenticated delivery, bounded decoding, ordering and disconnect handling. Captured bytes alone do not establish StateSync, EntitySync, MapSync, PlayerSync or ClusterSync. |
 | Godot XR client | General runtime, scene and declared test-profile tools | Client-owned XR origin, head/hand input, locomotion and interactions need a real headset test with tracking-loss handling and measured frame time. Headless success does not prove XR. |
 | Assets | Bounded glTF/GLB checks, dependency fingerprints, versioned policy and optional disposable Godot import | Authoring pipeline must provide provenance, LOD, textures and collisions. Target-device measurements must establish VRAM, frame time and visual/collision quality before VR readiness. |
-| Template registry | `template registry inspect` checks catalog, profiles, common/family contract evidence, references and checksums | Strict schema validation is a separate gate: first obtain catalogued strict family schemas and compatible strict-v1 templates, then implement a bounded validator with positive and negative controls. |
+| Template registry | `template registry inspect` checks catalog integrity; `template validate` evaluates one strict template against its common/family schemas | Godot consumer readiness still requires explicit compatibility evidence. Numeric spec canonicalization, instantiation and migration remain separate gates. |
 | Maps and streaming | Generic scene inspection and test-profile execution | Client-owned zone/tile loading needs bounded residency, cancellation, unloading, collision/navigation continuity and cross-zone tests. Roofing and map creation need their own content contracts. |
 | Cluster integration | No dedicated cluster command | Server-owned heartbeat, failover and handoff contracts must exist before a CLI adapter. First prove one bounded recorded diagnostic against an authoritative fixture; operational actions require a separate design. |
 | Mods | Local addon-manifest v1 structural inspection, with authoritative parity available in tests | Server/package tooling must establish signature trust, package integrity, dependency compatibility, lifecycle and rollback. Manifest inspection never permits activation. |
@@ -46,10 +46,11 @@ Integrity failures must also keep readiness false. Even a true readiness
 result is registry inspection evidence, not full JSON Schema evaluation or
 a successful Godot load.
 
-The next template implementation must meet all of these conditions:
+The local schema-validation implementation follows these gates:
 
 1. Record a fresh registry inspection and identify the exact strict template,
-   family schema, common-contract version and Godot compatibility evidence.
+   family schema and common-contract version. Report Godot compatibility separately;
+   absence of Godot evidence does not prevent local schema validation.
 2. Define supported JSON Schema behavior and resolve only bounded local,
    catalogued references; reject unavailable references and unsupported
    behavior rather than silently accepting them.
@@ -58,8 +59,10 @@ The next template implementation must meet all of these conditions:
 4. Preserve source bytes and return a failing status for invalid or incomplete
    validation. Keep schema results separate from Godot runtime results.
 
-`template validate`, `instantiate` and `migrate` are not introduced by this
-roadmap. Instantiation and migration need separate designs and evidence after
+`template validate` now implements the local gate described in the
+[command guide](../README.md#strict-template-schema-validation), with explicit
+limits on supported schemas and spec canonicalization. `instantiate` and
+`migrate` remain unavailable. They need separate designs and evidence after
 the strict validation gate. Runtime validation must actually invoke Godot and
 inspect its logs before claiming a Godot result.
 

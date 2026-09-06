@@ -5,6 +5,32 @@ debug build. It must never be treated as a production gameplay API.
 
 ## Enforced defaults
 
+### Strict template validation
+
+`template validate` only evaluates catalogued strict-v1 documents from an
+explicit local registry. It requires registry inspection to succeed, validates
+the selected document against common and family schemas with Ajv Draft 2020-12,
+and never invokes Godot. Schema identifiers do not trigger network retrieval.
+Local references resolve only to catalogued strict schemas; only the exact
+common-contract remote identifier is recognized as a local lookup key.
+
+The selected document and schema reads reject symbolic path components,
+duplicate JSON keys, non-finite numbers, invalid UTF-8 and oversized input.
+Files are bounded during reading, hashed against the catalog and rechecked
+after evaluation. These checks detect drift; they do not create a filesystem
+transaction or verify signatures. Dependency identities are inspected, while
+recursive dependency schema validation remains outside this command.
+
+Compilation and validation run in a disposable worker with a 120-second parent
+deadline and 192 MiB old-generation heap limit (not a total process RSS bound).
+This keeps costly schema/regex evaluation off the parent event loop but is not
+an OS sandbox. No custom keywords, schema loaders or user JavaScript are installed.
+Ajv runs without data coercion, defaults, property removal or `allErrors`.
+Unknown formats and unsupported schema features reject the operation. Numeric
+specs fail closed until registry checksum serialization parity is established.
+
+### Runtime defaults
+
 - The server starts only when `OS.is_debug_build()` is true.
 - TCP is bound to `127.0.0.1`; remote hosts are rejected by the Node client.
   Literal addresses must be inside `127.0.0.0/8` or IPv6 loopback. The
