@@ -37,6 +37,7 @@ The executable is named **`uo-godot-cli`** to avoid colliding with the unrelated
 | Compare CLI and `godot_ai` capabilities | `project compatibility` | No | Only with `--live` |
 | Inspect one addon-manifest v1 file | `mod manifest inspect` | No | No |
 | Inspect one captured replication frame | `network replication inspect` | No | No |
+| Inspect one captured client VR request | `network vr-request inspect` | No | No |
 | Start and own one local runtime | `runtime start` | Yes | Yes |
 | Prove one scene and stop cleanly | `scene validate` | Yes | Yes |
 | Run an allowlisted project test | `test list`, then `test run` | Runner-dependent | No runtime token |
@@ -260,6 +261,31 @@ anti-cheat acceptance, delivery, latency, rendering, VR, or production behavior.
 When `UO_ZIG_SERVER_ROOT` is configured during tests, the optional parity gate
 runs `zig build test-replication --summary all` through the authoritative
 `build.zig`; production inspection never runs Zig or parses Zig source text.
+
+### VR grab and release request inspection
+
+```bash
+uo-godot-cli network vr-request inspect /path/to/vr-request.bin
+```
+
+This local tokenless command accepts only complete client-to-server grab and
+release frames. Grab opcode `128` is exactly 15 bytes and contains `u64`
+`object_id` plus hand `0` or `1`. Release opcode `129` is exactly 38 bytes and
+contains `object_id`, a big-endian linear `Vec3 f32`, and a big-endian angular
+`Vec3 f32`; every velocity component must be finite. IDs are returned as
+decimal strings without JavaScript precision loss.
+
+The `.bin` source is regular, non-symbolic, capped at 38 bytes, and fingerprinted
+before and after inspection. Every report retains
+`serverValidationRequired: true`: structural success does not prove object
+existence, ownership, reach, grabbed state, physics-body state, or acceptance
+after the server's velocity clamps.
+
+Server broadcasts deliberately remain unsupported even though they reuse
+opcodes `128` and `129` with different payload sizes. Pose, voice, locomotion,
+socket, capture, replay, send, and Godot mutation are also absent. Optional test
+parity uses `zig build test-vr-protocol --summary all`; production never runs
+Zig or connects to the game server.
 
 ### Managed runtime
 
@@ -521,6 +547,7 @@ Only loopback hosts are accepted. `localhost` is resolved and revalidated before
 
 | Gate | Result | Proof boundary |
 |---|---|---|
+| VR request inspection local gate, 2026-09-04 | **168 passed, 0 failed, 0 skipped** | Full local suite with Godot 4.7-dev5, FoveaCore, template registry, addon/replication parity, and authoritative VR grab/release parity 3/3. This proves captured client request structure only, not server acceptance, broadcast, tracking, locomotion, physics outcome, rendering, headset behavior, or production networking. |
 | Replication inspection merged local gate, 2026-09-04 | **156 passed, 0 failed, 0 skipped** | Full local suite with Godot 4.7-dev5, FoveaCore, 6,382-file template registry, addon trust parity, and authoritative `test-replication` 5/5. This proves captured-frame structure only, not authentication, sockets, delivery, interpolation, Godot application, live EntitySync, or production networking. |
 | Asset + Template + Mod merged integration gate, 2026-08-29 | **139 passed, 0 failed, 0 skipped** | Real Godot 4.7-dev5 disposable asset import, FoveaCore bridge, 6,382-file template registry inspection, strict-to-legacy supersession graph, Zig addon-manifest/trust-store parity, package consumer, runtime and scene validation. This remains local development evidence, not GPU, VRAM, visual-quality, collision-quality, performance, production, or OpenXR proof. |
 | Asset validation + Godot 4.7-dev5 local gate, 2026-08-22 | **98 passed, 0 failed, 1 skipped** out of 99 | Static glTF/GLB, dependency, policy, package CLI, real disposable mesh import, collision-required rejection, and canonical source fingerprints. Fovea remained explicitly skipped; this is not GPU, VRAM, visual-quality, collision-quality, performance, or OpenXR proof. |

@@ -180,6 +180,26 @@ test("packed CLI installs and manages its addon outside the source tree", async 
   assert.match(replicationReport.integrity.sha256, /^[0-9a-f]{64}$/);
   assert.deepEqual(await fs.readFile(replicationFrameFile), replicationFrameBytes);
 
+  const vrRequestFile = path.join(temporaryRoot, "vr-grab.bin");
+  const vrRequestBytes = Buffer.from([
+    0x00, 0x00, 0x00, 0x0b, 0x00, 0x80,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x01,
+  ]);
+  await fs.writeFile(vrRequestFile, vrRequestBytes);
+  const vrRequestReport = JSON.parse(
+    runInstalledCli(
+      cliPath,
+      ["network", "vr-request", "inspect", vrRequestFile],
+      consumer
+    )
+  );
+  assert.equal(vrRequestReport.status, "ok");
+  assert.equal(vrRequestReport.request.objectId, "72623859790382856");
+  assert.equal(vrRequestReport.request.hand, "right");
+  assert.equal(vrRequestReport.serverValidationRequired, true);
+  assert.deepEqual(await fs.readFile(vrRequestFile), vrRequestBytes);
+
   const projectDefinition = `config_version=5
 
 [application]
