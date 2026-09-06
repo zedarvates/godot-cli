@@ -39,6 +39,7 @@ const REQUIRED_ENVELOPE_FIELDS = new Set([
 
 export interface TemplateRegistryInspectionOptions {
   root: string;
+  maxReadBytes?: number;
 }
 
 export interface RegistryFinding {
@@ -76,6 +77,7 @@ export interface TemplateRegistryInspectionReport {
   integrityReady: boolean;
   strictContentReady: boolean;
   consumerReady: boolean;
+  readBudget: { limitBytes: number; consumedBytes: number; exhausted: boolean };
   reasons: string[];
   findings: RegistryFinding[];
   boundaries: string[];
@@ -172,10 +174,15 @@ function validateJsonShape(value: unknown): void {
   }
 }
 
+class RegistryReadBudgetExceeded extends Error {
+  constructor() { super("Registry referenced read-byte limit exceeded"); }
+}
+
 async function readJson(
   root: string,
   resource: string,
-  maximumBytes: number
+  maximumBytes: number,
+  budget?: { remaining: number }
 ): Promise<{ value: unknown; absolutePath: string; bytes: number; sha256: string }> {
   const file = await requireRegularFile(root, resource, maximumBytes);
   const handle = await fs.open(file.absolutePath, "r");
@@ -184,13 +191,15 @@ async function readJson(
     if (!before.isFile() || before.size > maximumBytes) {
       throw new Error(`Registry resource exceeds its limit or changed type: ${resource}`);
     }
+    if (budget && before.size > budget.remaining) throw new RegistryReadBudgetExceeded();
     // One extra byte detects growth without allocating/reading an unbounded file.
-    const buffer = Buffer.alloc(before.size + 1);
+    const buffer = Buffer.alloc(Math.min(before.size + 1, budget?.remaining ?? Infinity));
     let bytes = 0;
     while (bytes < buffer.length) {
       const chunk = await handle.read(buffer, bytes, buffer.length - bytes, null);
       if (chunk.bytesRead === 0) break;
       bytes += chunk.bytesRead;
+      if (budget) budget.remaining -= chunk.bytesRead;
     }
     const after = await handle.stat();
     const current = await fs.lstat(file.absolutePath);
@@ -540,6 +549,12 @@ function validateStrictTemplate(
 export async function inspectTemplateRegistry(
   options: TemplateRegistryInspectionOptions
 ): Promise<TemplateRegistryInspectionReport> {
+  const maxReadBytes = options.maxReadBytes ?? MAX_REGISTRY_TOTAL_BYTES;
+  if (!Number.isInteger(maxReadBytes) || maxReadBytes < 1 || maxReadBytes > MAX_REGISTRY_TOTAL_BYTES) {
+    throw new Error(`maxReadBytes must be an integer between 1 and ${MAX_REGISTRY_TOTAL_BYTES}`);
+  }
+  const budget = { remaining: maxReadBytes };
+  let budgetExhausted = false;
   const root = await requireRegistryRoot(options.root);
   const catalogFile = await readJson(root, CATALOG_RESOURCE, MAX_REGISTRY_CATALOG_BYTES);
   if (!isRecord(catalogFile.value)) throw new Error("Registry catalog must be an object");
@@ -575,6 +590,7 @@ export async function inspectTemplateRegistry(
   let verifiedBytes = 0;
   for (const [index, rawEntry] of catalog.entries.entries()) {
     try {
+      if (budget.remaining === 0) throw new RegistryReadBudgetExceeded();
       const { entry, profile } = validateBaseEntry(rawEntry, index);
       profiles[profile] += 1;
       const resource = String(entry.file);
@@ -587,11 +603,9 @@ export async function inspectTemplateRegistry(
       const file = await readJson(
         root,
         resource,
-        MAX_REGISTRY_REFERENCED_FILE_BYTES
+        MAX_REGISTRY_REFERENCED_FILE_BYTES,
+        budget
       );
-      if (verifiedBytes + file.bytes > MAX_REGISTRY_TOTAL_BYTES) {
-        throw new Error("Registry referenced bytes exceed the total limit");
-      }
       const actualChecksum = file.sha256;
       if (actualChecksum !== entry.sha256) {
         findings.push({
@@ -616,6 +630,10 @@ export async function inspectTemplateRegistry(
         location: `/entries/${index}`,
         message: error instanceof Error ? error.message : String(error),
       });
+      if (error instanceof RegistryReadBudgetExceeded) {
+        budgetExhausted = true;
+        break;
+      }
     }
   }
 
@@ -886,6 +904,7 @@ export async function inspectTemplateRegistry(
     integrityReady: integral,
     strictContentReady,
     consumerReady,
+    readBudget: { limitBytes: maxReadBytes, consumedBytes: maxReadBytes - budget.remaining, exhausted: budgetExhausted },
     reasons,
     findings: findings.slice(0, MAX_REGISTRY_FINDINGS),
     boundaries: [BOUNDARY],

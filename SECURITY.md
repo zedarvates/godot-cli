@@ -12,6 +12,9 @@ detection: distinct escape spellings of the same decoded key are rejected within
 an object, including objects nested in arrays. The read cannot exceed the initial file size plus one
 byte, with the initial size itself capped by the resource limit. This does not
 lock the registry or promise a transactional snapshot across all its files.
+The referenced-file budget charges all bytes read, including failed parses and
+checksum mismatches. Inspection stops when the next file cannot fit; the CLI
+can lower but never raise the 512 MiB ceiling. The catalog has a separate cap.
 
 ### Strict template validation
 

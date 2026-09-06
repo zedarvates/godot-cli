@@ -7,6 +7,10 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Fixed
 
+- Charge rejected registry files against the aggregate read budget and stop
+  before a file would exceed it. Report consumption in `readBudget` and allow
+  a lower ceiling with `template registry inspect --max-read-bytes`.
+
 - Reject duplicate decoded JSON keys in registry catalogs and referenced files;
   share detection with strict template validation, including escaped aliases.
 

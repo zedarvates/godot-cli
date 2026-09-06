@@ -665,9 +665,11 @@ templateRegistryCommands
   .command("inspect")
   .description("Verify catalog, profiles, schemas, checksums, and readiness")
   .argument("<root>", "Explicit local registry root")
-  .action(async (root: string) => {
+  .option("--max-read-bytes <bytes>", "Lower the referenced-file read budget (maximum 536870912)")
+  .action(async (root: string, options: { maxReadBytes?: string }) => {
     try {
-      const report = await inspectTemplateRegistry({ root });
+      const report = await inspectTemplateRegistry({ root,
+        maxReadBytes: options.maxReadBytes === undefined ? undefined : Number(options.maxReadBytes) });
       printLocalResult(report);
       if (report.status !== "ok") process.exitCode = 1;
     } catch (error) {
