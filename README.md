@@ -416,6 +416,11 @@ evidence-bearing `godot-vr` compatibility records. It reads only
 `templates/catalog.json` and files named by that catalog; it does not scan the
 tree or access the network.
 
+Each JSON document and its SHA-256 are derived from the same bounded byte
+snapshot. Reads detect file growth and metadata drift, reject invalid UTF-8,
+and handle short reads without dropping bytes. This is snapshot evidence,
+not a filesystem transaction or a guarantee against changes after inspection.
+
 Readiness is deliberately layered. `integrityReady` means the bounded
 inspection completed without error. `strictContentReady` additionally requires
 at least one verified strict family schema and linked `strict-v1` template.

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
 export const MAX_REGISTRY_CATALOG_BYTES = 16 * 1024 * 1024;
@@ -175,21 +175,38 @@ async function readJson(
   root: string,
   resource: string,
   maximumBytes: number
-): Promise<{ value: unknown; absolutePath: string; bytes: number }> {
+): Promise<{ value: unknown; absolutePath: string; bytes: number; sha256: string }> {
   const file = await requireRegularFile(root, resource, maximumBytes);
-  const value: unknown = JSON.parse(await fs.readFile(file.absolutePath, "utf8"));
-  validateJsonShape(value);
-  return { value, ...file };
-}
-
-function sha256File(file: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const digest = createHash("sha256");
-    const stream = createReadStream(file);
-    stream.on("data", (chunk) => digest.update(chunk));
-    stream.once("error", reject);
-    stream.once("end", () => resolve(digest.digest("hex")));
-  });
+  const handle = await fs.open(file.absolutePath, "r");
+  try {
+    const before = await handle.stat();
+    if (!before.isFile() || before.size > maximumBytes) {
+      throw new Error(`Registry resource exceeds its limit or changed type: ${resource}`);
+    }
+    // One extra byte detects growth without allocating/reading an unbounded file.
+    const buffer = Buffer.alloc(before.size + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const chunk = await handle.read(buffer, bytes, buffer.length - bytes, null);
+      if (chunk.bytesRead === 0) break;
+      bytes += chunk.bytesRead;
+    }
+    const after = await handle.stat();
+    const current = await fs.lstat(file.absolutePath);
+    if (bytes !== before.size || before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs ||
+        current.isSymbolicLink() || !current.isFile() ||
+        current.dev !== after.dev || current.ino !== after.ino ||
+        current.size !== after.size || current.mtimeMs !== after.mtimeMs) {
+      throw new Error(`Registry resource changed during read: ${resource}`);
+    }
+    const snapshot = buffer.subarray(0, bytes);
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(snapshot);
+    const value: unknown = JSON.parse(text);
+    validateJsonShape(value);
+    return { value, absolutePath: file.absolutePath, bytes,
+      sha256: createHash("sha256").update(snapshot).digest("hex") };
+  } finally { await handle.close(); }
 }
 
 function exactKeys(
@@ -573,7 +590,7 @@ export async function inspectTemplateRegistry(
       if (verifiedBytes + file.bytes > MAX_REGISTRY_TOTAL_BYTES) {
         throw new Error("Registry referenced bytes exceed the total limit");
       }
-      const actualChecksum = await sha256File(file.absolutePath);
+      const actualChecksum = file.sha256;
       if (actualChecksum !== entry.sha256) {
         findings.push({
           severity: "error",
