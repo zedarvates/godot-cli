@@ -7,7 +7,9 @@ debug build. It must never be treated as a production gameplay API.
 
 Registry inspection decodes and hashes the same bounded byte snapshot from an
 open file handle. It rejects invalid UTF-8, growth and observed metadata/identity
-changes during the read. The read cannot exceed the initial file size plus one
+changes during the read. Inspection and template validation share duplicate-key
+detection: distinct escape spellings of the same decoded key are rejected within
+an object, including objects nested in arrays. The read cannot exceed the initial file size plus one
 byte, with the initial size itself capped by the resource limit. This does not
 lock the registry or promise a transactional snapshot across all its files.
 

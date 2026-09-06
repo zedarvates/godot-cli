@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { assertUniqueJsonKeys } from "./json-keys.js";
 
 export const MAX_REGISTRY_CATALOG_BYTES = 16 * 1024 * 1024;
 export const MAX_REGISTRY_REFERENCED_FILE_BYTES = 4 * 1024 * 1024;
@@ -204,6 +205,7 @@ async function readJson(
     const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(snapshot);
     const value: unknown = JSON.parse(text);
     validateJsonShape(value);
+    assertUniqueJsonKeys(text);
     return { value, absolutePath: file.absolutePath, bytes,
       sha256: createHash("sha256").update(snapshot).digest("hex") };
   } finally { await handle.close(); }

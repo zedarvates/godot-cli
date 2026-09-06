@@ -418,7 +418,8 @@ tree or access the network.
 
 Each JSON document and its SHA-256 are derived from the same bounded byte
 snapshot. Reads detect file growth and metadata drift, reject invalid UTF-8,
-and handle short reads without dropping bytes. This is snapshot evidence,
+reject duplicate decoded object keys (including escaped aliases), and handle
+short reads without dropping bytes. This is snapshot evidence,
 not a filesystem transaction or a guarantee against changes after inspection.
 
 Readiness is deliberately layered. `integrityReady` means the bounded
@@ -429,7 +430,7 @@ An integral legacy-only registry returns exit 0 with `consumerReady: false`;
 legacy entries and `intended_consumers` hints never count as compatibility.
 
 Inspection does not execute Draft 2020-12, recompute canonical
-`spec_checksum`, detect duplicate JSON keys, validate or instantiate a template,
+`spec_checksum`, validate or instantiate a template,
 migrate content, run Python/Godot, or prove runtime compatibility. Use the separate
 [`template validate` command](#strict-template-schema-validation) for supported
 strict schema and spec-checksum validation. `instantiate` and `migrate` remain unavailable.
