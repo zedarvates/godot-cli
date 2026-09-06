@@ -7,6 +7,10 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Fixed
 
+- Check schema keywords and formats in unused definitions before compilation;
+  keep annotation and constant data outside schema-vocabulary traversal.
+- Count boolean schemas toward the 4,096-node schema traversal limit.
+
 - Reject unsupported numeric tokens in loaded template schemas before Ajv
   evaluation, preventing rounded bounds from silently changing the verdict.
   This applies to every loaded schema, including annotations and constants.

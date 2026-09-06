@@ -107,11 +107,22 @@ function canonicalSpec(value: any): string {
   return JSON.stringify(value);
 }
 
-function prepareSchema(schema: ObjectValue, resource: string, schemas: Map<string, ObjectValue>): void {
+function prepareSchema(schema: ObjectValue, resource: string, schemas: Map<string, ObjectValue>, ajv: Ajv2020): void {
   let count = 0;
   function visit(node: any, top = false): void {
+    if (++count > 4096) throw new Error("Schema node limit exceeded");
     if (typeof node === "boolean") return;
-    if (!object(node) || ++count > 4096) throw new Error("Invalid schema or schema node limit exceeded");
+    if (!object(node)) throw new Error("Invalid schema node");
+    // Ajv may not compile unused definitions. Enforce the supported vocabulary
+    // across all schema nodes, without interpreting const/default/example data.
+    for (const keyword of Object.keys(node)) {
+      // RULES.keywords includes annotation-only vocabulary entries such as
+      // $schema/title; getKeyword covers only rules with validation definitions.
+      if (!Object.hasOwn(ajv.RULES.keywords, keyword)) throw new Error(`Unsupported schema keyword: ${keyword}`);
+    }
+    if ("format" in node && node.format !== "date-time") {
+      throw new Error("Unsupported schema format: only date-time is enabled");
+    }
     for (const keyword of ["$async", "$vocabulary", "$dynamicRef", "$dynamicAnchor", "$recursiveRef", "$recursiveAnchor", "contentSchema", "contentEncoding", "contentMediaType"]) {
       if (keyword in node) throw new Error(`Unsupported schema keyword: ${keyword}`);
     }
@@ -133,6 +144,9 @@ function prepareSchema(schema: ObjectValue, resource: string, schemas: Map<strin
     }
     for (const key of ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]) {
       if (object(node[key])) for (const child of Object.values(node[key])) visit(child);
+    }
+    if (object(node.dependencies)) {
+      for (const child of Object.values(node.dependencies)) if (!Array.isArray(child)) visit(child);
     }
     for (const key of ["allOf", "anyOf", "oneOf", "prefixItems"]) {
       if (Array.isArray(node[key])) for (const child of node[key]) visit(child);
@@ -182,10 +196,10 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
   const expectedSchema = path.posix.relative(path.posix.dirname(options.template), entry.schema_file);
   if (doc.$schema !== expectedSchema && doc.$schema !== family.$id) throw new Error("Template schema disagrees with its catalogued family");
   if (`sha256:${hash(canonicalSpec(doc.spec))}` !== doc.spec_checksum) throw new Error("Spec checksum mismatch");
-  for (const [resource, schema] of schemas) prepareSchema(schema, resource, schemas);
   const ajv = new Ajv2020({ strict: true, strictTypes: false, allErrors: false, validateFormats: true,
     coerceTypes: false, useDefaults: false, removeAdditional: false, logger: false });
   formats.default(ajv, { formats: ["date-time"] });
+  for (const [resource, schema] of schemas) prepareSchema(schema, resource, schemas, ajv);
   for (const schema of schemas.values()) ajv.addSchema(schema);
   const findings: TemplateValidationReport["findings"] = [];
   for (const schema of [schemas.get(COMMON)!, family]) {

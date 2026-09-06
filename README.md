@@ -232,7 +232,9 @@ template is valid and the registry contains its explicit `godot-vr` record;
 Catalogued local schema references and the exact common-contract identifier are
 resolved without network retrieval. Unknown keywords/formats, nested schema
 identifiers, dynamic/recursive references and content-encoding keywords fail
-closed. The command never coerces values, inserts defaults or removes fields.
+closed, including inside unused definitions. Vocabulary checks walk schema
+positions only; object keys in `const`, `default` and `examples` remain data.
+The command never coerces values, inserts defaults or removes fields.
 The selected file and all loaded schemas are fingerprinted again after evaluation.
 
 Limits: 256 KiB per template/schema, 32 schemas, 4,096 schema nodes per file,
