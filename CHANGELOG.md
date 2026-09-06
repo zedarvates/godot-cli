@@ -7,6 +7,9 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Fixed
 
+- Reject duplicate decoded JSON keys in registry catalogs and referenced files;
+  share detection with strict template validation, including escaped aliases.
+
 - Decode registry JSON and compute its checksum from the same bounded bytes,
   detecting read-time growth/drift and rejecting malformed UTF-8 instead of
   silently replacing bytes. Short-read and concurrent-replacement regressions

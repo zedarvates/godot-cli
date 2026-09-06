@@ -2,6 +2,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { assertUniqueJsonKeys } from "./json-keys.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import formats from "ajv-formats";
 import { inspectTemplateRegistry } from "./template-registry-inspection.js";
@@ -27,24 +28,20 @@ function parse(bytes: Buffer): { value: any; exactIntegerTokens: boolean } {
   const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   const value = JSON.parse(text);
   const tokens = text.match(/"(?:\\.|[^"\\])*"|[{}\[\]:,]|[^\s{}\[\]:,]+/g) ?? [];
-  const stack: Array<Set<string> | null> = [];
+  let depth = 0;
   let values = 0;
   let exactIntegerTokens = true;
   for (let i = 0; i < tokens.length; i++) {
     if (++values > 2_000_000) throw new Error("JSON token limit exceeded");
     const token = tokens[i];
     if (token === "{" || token === "[") {
-      stack.push(token === "{" ? new Set() : null);
-      if (stack.length > 64) throw new Error("JSON depth limit exceeded");
-    } else if (token === "}" || token === "]") stack.pop();
+      if (++depth > 64) throw new Error("JSON depth limit exceeded");
+    } else if (token === "}" || token === "]") depth--;
     else if (token.startsWith('"')) {
       const decoded = JSON.parse(token);
       if (decoded.length > 1_048_576) throw new Error("JSON string limit exceeded");
       if (tokens[i + 1] === ":") {
-        const keys = stack[stack.length - 1];
-        if (!keys || keys.has(decoded)) throw new Error("Duplicate JSON key");
         if (["__proto__", "prototype", "constructor"].includes(decoded)) throw new Error("Forbidden JSON key");
-        keys.add(decoded);
       }
     } else if (![':', ',', 'true', 'false', 'null'].includes(token)) {
       if (!Number.isFinite(Number(token))) throw new Error("Non-finite JSON number");
@@ -55,6 +52,7 @@ function parse(bytes: Buffer): { value: any; exactIntegerTokens: boolean } {
       }
     }
   }
+  assertUniqueJsonKeys(text);
   return { value, exactIntegerTokens };
 }
 
@@ -179,7 +177,10 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
   const catalog = await read(root, CATALOG, 16 * 1024 * 1024);
   const inspection = await inspectTemplateRegistry({ root });
   if (!inspection.complete || !inspection.integrityReady || !inspection.strictContentReady) {
-    return validationFailure(options.template, "TEMPLATE_REGISTRY_NOT_READY", "Registry integrity and strict content are required");
+    const reason = inspection.findings.find(finding => finding.severity === "error")?.message
+      ?? inspection.reasons.join(" ");
+    return validationFailure(options.template, "TEMPLATE_REGISTRY_NOT_READY",
+      `Registry integrity and strict content are required: ${reason}`);
   }
   const entries = catalog.value.entries as ObjectValue[];
   const entry = entries.find(e => e.file === options.template);
