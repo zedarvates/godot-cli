@@ -241,10 +241,13 @@ old-generation heap limit; this is not an OS sandbox or a total RSS limit.
 `valid: false, complete: true` means a completed schema rejection;
 `complete: false` means the prerequisites or execution failed. Both exit nonzero.
 
-The initial canonical `spec_checksum` implementation supports strings, booleans,
-null, arrays and objects, matching the registry's sorted-key UTF-8 form. Numeric
-spec values are explicitly rejected pending Python/JavaScript serialization
-parity. Dependencies are checked for registry resolution, not recursively schema
+The canonical `spec_checksum` implementation supports strings, booleans, null,
+arrays, objects and integer tokens from -9,007,199,254,740,991 to
+9,007,199,254,740,991, matching the registry's sorted-key UTF-8 form. Integer
+`-0` canonicalizes to `0`. The selected template's original number tokens are
+checked: decimals, exponent notation (even `1.0` or `1e0`) and integers outside
+that range fail closed because parsing can erase Python's numeric distinctions.
+Dependencies are checked for registry resolution, not recursively schema
 validated by this command. No instantiation, migration or Godot execution occurs.
 
 ### Mod manifest structural inspection
@@ -584,6 +587,7 @@ Only loopback hosts are accepted. `localhost` is resolved and revalidated before
 
 | Gate | Result | Proof boundary |
 |---|---|---|
+| Exact integer checksum gate, 2026-09-06 | **155 passed, 0 failed, 26 skipped** in the portable suite; **13/13** focused tests with the real registry serializer | Nine canonical vectors matched Python and the registry implementation. Decimal/exponent tokens and unsafe integers were rejected, including source forms whose distinction disappears during JavaScript parsing. Packaged CLI integer validation passed; no new Godot compatibility proof. |
 | Strict template validation, 2026-09-06 | **177 passed, 0 failed, 0 skipped** with `node --test --test-concurrency=1 test/*.test.mjs` after build | Full configured local suite, including packaged template validation. A separate real strict template passed common/family schema evaluation with unchanged source fingerprints and `consumerReady: false`. Parallel local runs encountered Godot asset-import and Fovea cleanup failures; those are not fixed by this change. Schema validity is not Godot runtime compatibility. |
 | VR request inspection local gate, 2026-09-04 | **168 passed, 0 failed, 0 skipped** | Full local suite with Godot 4.7-dev5, FoveaCore, template registry, addon/replication parity, and authoritative VR grab/release parity 3/3. This proves captured client request structure only, not server acceptance, broadcast, tracking, locomotion, physics outcome, rendering, headset behavior, or production networking. |
 | Replication inspection merged local gate, 2026-09-04 | **156 passed, 0 failed, 0 skipped** | Full local suite with Godot 4.7-dev5, FoveaCore, 6,382-file template registry, addon trust parity, and authoritative `test-replication` 5/5. This proves captured-frame structure only, not authentication, sockets, delivery, interpolation, Godot application, live EntitySync, or production networking. |

@@ -23,12 +23,13 @@ function resourcePath(value: string): void {
 
 // Parse first, then examine JSON tokens to reject duplicate decoded object keys.
 // JSON.parse alone would silently retain the last value.
-function parse(bytes: Buffer): any {
+function parse(bytes: Buffer): { value: any; exactIntegerTokens: boolean } {
   const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   const value = JSON.parse(text);
   const tokens = text.match(/"(?:\\.|[^"\\])*"|[{}\[\]:,]|[^\s{}\[\]:,]+/g) ?? [];
   const stack: Array<Set<string> | null> = [];
   let values = 0;
+  let exactIntegerTokens = true;
   for (let i = 0; i < tokens.length; i++) {
     if (++values > 2_000_000) throw new Error("JSON token limit exceeded");
     const token = tokens[i];
@@ -45,11 +46,16 @@ function parse(bytes: Buffer): any {
         if (["__proto__", "prototype", "constructor"].includes(decoded)) throw new Error("Forbidden JSON key");
         keys.add(decoded);
       }
-    } else if (![':', ',', 'true', 'false', 'null'].includes(token) && !Number.isFinite(Number(token))) {
-      throw new Error("Non-finite JSON number");
+    } else if (![':', ',', 'true', 'false', 'null'].includes(token)) {
+      if (!Number.isFinite(Number(token))) throw new Error("Non-finite JSON number");
+      // Python distinguishes int tokens from float tokens (including 1.0/1e0).
+      // Retain this evidence before JSON.parse's numeric representation is used.
+      if (!/^-?(?:0|[1-9][0-9]*)$/.test(token) || !Number.isSafeInteger(Number(token))) {
+        exactIntegerTokens = false;
+      }
     }
   }
-  return value;
+  return { value, exactIntegerTokens };
 }
 
 async function read(root: string, resource: string, limit: number) {
@@ -79,14 +85,16 @@ async function read(root: string, resource: string, limit: number) {
       throw new Error("Resource changed or exceeded its read limit");
     }
     const data = bytes.subarray(0, size);
-    return { value: parse(data), sha256: hash(data), resource, limit };
+    return { ...parse(data), sha256: hash(data), resource, limit };
   } finally { await handle.close(); }
 }
 
-// Match the registry's Python sorted-key UTF-8 canonical form for the initial
-// string/bool/null specs. Numeric specs need a separately proven serializer.
+// Match Python sorted-key UTF-8 serialization for exact integer source tokens.
+// The caller must also check lexical evidence: a parsed 1 might originate in 1.0.
 function canonicalSpec(value: any): string {
-  if (typeof value === "number") throw new Error("Numeric spec canonicalization is not supported yet");
+  if (typeof value === "number" && !Number.isSafeInteger(value)) {
+    throw new Error("Numeric spec requires exact safe integers");
+  }
   if (Array.isArray(value)) return `[${value.map(canonicalSpec).join(",")}]`;
   if (object(value)) return `{${Object.keys(value).sort((a,b) => {
     const aa=Array.from(a, c=>c.codePointAt(0)!); const bb=Array.from(b, c=>c.codePointAt(0)!);
@@ -151,6 +159,9 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
   if (!entry || entry.validation_profile !== "strict-v1") throw new Error("Selected resource is not a catalogued strict-v1 template");
   const template = await read(root, options.template, 256 * 1024);
   if (template.sha256 !== entry.sha256) throw new Error("Template checksum mismatch");
+  if (!template.exactIntegerTokens) {
+    throw new Error("Numeric spec requires safe integer tokens without decimals or exponents");
+  }
   const snapshots = [catalog, template];
   const schemas = new Map<string, ObjectValue>();
   const schemaEntries = entries.filter(e => e.validation_profile === "strict-schema-v1");

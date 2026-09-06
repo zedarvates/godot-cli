@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { fixture, TEMPLATE } from "./helpers/template-validation-fixture.mjs";
+import { fixture, TEMPLATE, specDigest } from "./helpers/template-validation-fixture.mjs";
 
 const PACKAGE_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const NPM_CLI = process.env.npm_execpath;
@@ -292,6 +292,15 @@ config/name="Package Consumer Test"
   assert.equal(templateReport.integrity.unchanged, true);
   assert.equal(templateReport.consumerReady, false);
   assert.equal(templateReport.godotValidation, "not_run");
+
+  strictRegistry.doc.spec.display_name = 42;
+  strictRegistry.doc.spec_checksum = specDigest(strictRegistry.doc.spec);
+  strictRegistry.family.allOf[1].properties.spec.properties.display_name = { type: "integer" };
+  await strictRegistry.save();
+  const integerReport = JSON.parse(runInstalledCli(cliPath,
+    ["template", "validate", TEMPLATE, "--registry", strictRegistry.root], consumer));
+  assert.equal(integerReport.valid, true);
+  assert.equal(integerReport.consumerReady, false);
 
   const before = JSON.parse(
     runInstalledCli(cliPath, ["addon", "status", project], consumer)
