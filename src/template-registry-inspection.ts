@@ -55,6 +55,8 @@ export interface TemplateRegistryInspectionReport {
   registryRoot: string;
   catalog: {
     resource: typeof CATALOG_RESOURCE;
+    sha256: string;
+    bytes: number;
     registryVersion: string | null;
     entries: number;
     aliases: number;
@@ -886,6 +888,8 @@ export async function inspectTemplateRegistry(
     registryRoot: root,
     catalog: {
       resource: CATALOG_RESOURCE,
+      sha256: catalogFile.sha256,
+      bytes: catalogFile.bytes,
       registryVersion: "2.0.0",
       entries: catalog.entries.length,
       aliases: catalog.aliases.length,

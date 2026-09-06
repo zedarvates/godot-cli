@@ -32,6 +32,9 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Added
 
+- Include `catalog.sha256` and `catalog.bytes` in registry inspection reports,
+  identifying the exact catalog snapshot independently of readiness.
+
 - Exact safe-integer `spec_checksum` support in `template validate`, with
   original-token checks and Python/registry serializer parity vectors. Decimal,
   exponent and out-of-range integer tokens remain unsupported and fail closed.

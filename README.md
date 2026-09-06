@@ -421,6 +421,10 @@ snapshot. Reads detect file growth and metadata drift, reject invalid UTF-8,
 reject duplicate decoded object keys (including escaped aliases), and handle
 short reads without dropping bytes. This is snapshot evidence,
 not a filesystem transaction or a guarantee against changes after inspection.
+`catalog.sha256` and `catalog.bytes` identify the exact catalog snapshot used by
+the report. Formatting-only changes alter this fingerprint. It remains present
+when referenced-file inspection is incomplete, but does not confer readiness
+or signature trust. Catalog bytes are separate from `readBudget.consumedBytes`.
 
 `--max-read-bytes <bytes>` can lower the default 536,870,912-byte total budget
 for referenced files. Bytes count as soon as they are read, including rejected
