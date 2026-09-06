@@ -175,7 +175,12 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
   if ((await fs.lstat(resolved)).isSymbolicLink()) throw new Error("Symbolic registry root is forbidden");
   const root = await fs.realpath(resolved);
   const catalog = await read(root, CATALOG, 16 * 1024 * 1024);
-  const inspection = await inspectTemplateRegistry({ root });
+  const pin = options.expectedCatalogSha256?.toLowerCase();
+  if (pin !== undefined && catalog.sha256 !== pin) {
+    return validationFailure(options.template, "TEMPLATE_CATALOG_MISMATCH",
+      "Registry catalog SHA-256 does not match expected digest");
+  }
+  const inspection = await inspectTemplateRegistry({ root, expectedCatalogSha256: pin });
   if (!inspection.complete || !inspection.integrityReady || !inspection.strictContentReady) {
     const reason = inspection.findings.find(finding => finding.severity === "error")?.message
       ?? inspection.reasons.join(" ");
@@ -242,6 +247,7 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
   }
   const valid = findings.length === 0;
   return { status: valid ? "ok" : "error", valid, complete: true, template: options.template,
+    catalogPinVerified: pin !== undefined,
     consumerReady: valid && inspection.consumerReady && doc.compatibility.some((c: ObjectValue) => c.consumer === "godot-vr"), godotValidation: "not_run",
     integrity: { unchanged: true, files: snapshots.map(({ resource, sha256 }) => ({ resource, sha256 })) }, findings };
 }
