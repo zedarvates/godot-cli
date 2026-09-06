@@ -7,6 +7,11 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Fixed
 
+- Decode registry JSON and compute its checksum from the same bounded bytes,
+  detecting read-time growth/drift and rejecting malformed UTF-8 instead of
+  silently replacing bytes. Short-read and concurrent-replacement regressions
+  cover the inspection path.
+
 - Resolve every schema reference, including unused definitions, and reject
   missing fragments, non-schema targets and malformed JSON Pointer escapes.
 
