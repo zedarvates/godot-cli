@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
+import { MAX_REGISTRY_TOTAL_BYTES, type TemplateRegistryInspectionReport } from "./template-registry-inspection.js";
 
-export interface TemplateValidationOptions { root: string; template: string; timeoutMs?: number; expectedCatalogSha256?: string }
+export interface TemplateValidationOptions { root: string; template: string; timeoutMs?: number; expectedCatalogSha256?: string; registryMaxReadBytes?: number }
 export interface TemplateValidationReport {
   status: "ok" | "error";
   valid: boolean;
@@ -9,13 +10,14 @@ export interface TemplateValidationReport {
   consumerReady: boolean;
   godotValidation: "not_run";
   catalogPinVerified: boolean;
+  registryReadBudget: TemplateRegistryInspectionReport["readBudget"] | null;
   integrity: { unchanged: boolean; files: Array<{ resource: string; sha256: string }> };
   findings: Array<{ code: string; location: string; message: string }>;
 }
 
 export function validationFailure(template: string, code: string, message: string): TemplateValidationReport {
   return { status: "error", valid: false, complete: false, template,
-    consumerReady: false, godotValidation: "not_run", catalogPinVerified: false,
+    consumerReady: false, godotValidation: "not_run", catalogPinVerified: false, registryReadBudget: null,
     integrity: { unchanged: false, files: [] },
     findings: [{ code, location: template, message: message.slice(0, 1024) }] };
 }
@@ -23,6 +25,11 @@ export function validationFailure(template: string, code: string, message: strin
 // The parent remains responsive even while a schema compiler or regex is busy.
 // This is a resource boundary, not an OS sandbox for executing user code.
 export function validateTemplate(options: TemplateValidationOptions): Promise<TemplateValidationReport> {
+  const budget = options.registryMaxReadBytes;
+  if (budget !== undefined && (!Number.isInteger(budget) || budget < 1 || budget > MAX_REGISTRY_TOTAL_BYTES)) {
+    return Promise.resolve(validationFailure(options.template, "TEMPLATE_LIMIT_INVALID",
+      `registryMaxReadBytes must be an integer between 1 and ${MAX_REGISTRY_TOTAL_BYTES}`));
+  }
   const pin = options.expectedCatalogSha256;
   if (pin !== undefined && (typeof pin !== "string" || !/^[0-9a-fA-F]{64}$/.test(pin))) {
     return Promise.resolve(validationFailure(options.template, "TEMPLATE_CATALOG_PIN_INVALID",

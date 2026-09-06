@@ -236,6 +236,13 @@ final source fingerprint checks still run. `catalogPinVerified` records a
 matching supplied pin in completed reports, including completed schema rejections;
 early failures leave it false. It does not override schema validity or readiness.
 
+`--registry-max-read-bytes <bytes>` lowers the registry inspection phase's
+referenced-file budget (maximum 536,870,912 bytes), including rejected files.
+`registryReadBudget` exposes that phase's accounting in completed reports and
+registry-prerequisite failures; null means accounting is unavailable.
+This is not a whole-command I/O cap: catalog reads and the separately bounded
+template/schema snapshot reads and final fingerprint checks remain additional.
+
 Catalogued local schema references and the exact common-contract identifier are
 resolved without network retrieval. Unknown keywords/formats, nested schema
 identifiers, dynamic/recursive references and content-encoding keywords fail
