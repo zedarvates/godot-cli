@@ -16,6 +16,10 @@ The executable is named **`uo-godot-cli`** to avoid colliding with the unrelated
 
 [Why this fork](#why-this-fork) · [Architecture](#architecture) · [Quick start](#quick-start) · [Command guide](#command-guide) · [Security modes](#security-modes) · [Validation evidence](#validation-evidence)
 
+The [Ultimate Odycer client integration roadmap](docs/ultimate-odycer-client-roadmap.md)
+maps the ten audit areas to current tooling, client/server responsibilities,
+and the evidence required for the next integration gates.
+
 ## Why this fork
 
 - **Safe by default:** authenticated, loopback-only, debug-only, and read-only at startup.
