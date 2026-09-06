@@ -5,6 +5,12 @@ pre-release versions until the public API and operational boundary are stable.
 
 ## Unreleased
 
+### Fixed
+
+- Reject unsupported numeric tokens in loaded template schemas before Ajv
+  evaluation, preventing rounded bounds from silently changing the verdict.
+  This applies to every loaded schema, including annotations and constants.
+
 ### Added
 
 - Exact safe-integer `spec_checksum` support in `template validate`, with

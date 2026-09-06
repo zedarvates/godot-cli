@@ -247,6 +247,9 @@ arrays, objects and integer tokens from -9,007,199,254,740,991 to
 `-0` canonicalizes to `0`. The selected template's original number tokens are
 checked: decimals, exponent notation (even `1.0` or `1e0`) and integers outside
 that range fail closed because parsing can erase Python's numeric distinctions.
+The same numeric-token restriction applies to every loaded schema, including
+numeric bounds, constants and annotations. This prevents schema limits from
+silently rounding before evaluation. Decimal schema limits are unsupported.
 Dependencies are checked for registry resolution, not recursively schema
 validated by this command. No instantiation, migration or Godot execution occurs.
 

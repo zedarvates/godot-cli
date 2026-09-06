@@ -169,6 +169,9 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
   for (const entry of schemaEntries) {
     const file = await read(root, entry.file, 256 * 1024);
     if (file.sha256 !== entry.sha256 || !object(file.value) || file.value.$schema !== DRAFT) throw new Error("Schema checksum or draft mismatch");
+    if (!file.exactIntegerTokens) {
+      throw new Error("Schema numbers require safe integer tokens without decimals or exponents");
+    }
     schemas.set(entry.file, structuredClone(file.value));
     snapshots.push(file);
   }
