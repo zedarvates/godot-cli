@@ -229,6 +229,13 @@ Godot compatibility record. `consumerReady` stays false unless the selected
 template is valid and the registry contains its explicit `godot-vr` record;
 `godotValidation` is always `not_run`.
 
+Pass `--expected-catalog-sha256 <digest>` to validate against a previously
+reviewed catalog snapshot. A mismatch stops before schema or template files are
+read. The first snapshot and the registry inspection both check the pin;
+final source fingerprint checks still run. `catalogPinVerified` records a
+matching supplied pin in completed reports, including completed schema rejections;
+early failures leave it false. It does not override schema validity or readiness.
+
 Catalogued local schema references and the exact common-contract identifier are
 resolved without network retrieval. Unknown keywords/formats, nested schema
 identifiers, dynamic/recursive references and content-encoding keywords fail

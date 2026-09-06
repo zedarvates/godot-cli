@@ -653,9 +653,11 @@ templateCommands
   .description("Validate one catalogued strict template against local JSON schemas")
   .argument("<template>", "Exact registry-relative templates/.../template.json path")
   .requiredOption("--registry <root>", "Explicit local registry root")
-  .action(async (template: string, options: { registry: string }) => {
+  .option("--expected-catalog-sha256 <digest>", "Require the reviewed catalog SHA-256 for validation")
+  .action(async (template: string, options: { registry: string; expectedCatalogSha256?: string }) => {
     try {
-      const report = await validateTemplate({ root: options.registry, template });
+      const report = await validateTemplate({ root: options.registry, template,
+        expectedCatalogSha256: options.expectedCatalogSha256 });
       printLocalResult(report);
       if (!report.valid || !report.complete) process.exitCode = 1;
     } catch (error) { reportLocalError(error); }

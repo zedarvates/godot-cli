@@ -32,6 +32,9 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Added
 
+- Extend `--expected-catalog-sha256` to `template validate`, checking the pin
+  before referenced files and reporting `catalogPinVerified` separately from validity.
+
 - `template registry inspect --expected-catalog-sha256` rejects an unexpected
   catalog snapshot before opening referenced files and reports `catalog.pinVerified`.
 
