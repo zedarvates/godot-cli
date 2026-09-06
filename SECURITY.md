@@ -26,7 +26,9 @@ deadline and 192 MiB old-generation heap limit (not a total process RSS bound).
 This keeps costly schema/regex evaluation off the parent event loop but is not
 an OS sandbox. No custom keywords, schema loaders or user JavaScript are installed.
 Ajv runs without data coercion, defaults, property removal or `allErrors`.
-Unknown formats and unsupported schema features reject the operation. Numeric
+Unknown formats and unsupported schema features reject the operation. Schema
+vocabulary checks also inspect unused schema definitions before compilation;
+`const`, `default` and `examples` values are not interpreted as schema nodes. Numeric
 specs support only original integer tokens in JavaScript's exact safe-integer
 range. Decimals, exponent notation and larger integers in the selected template
 are rejected before checksum evaluation; number-looking strings are unaffected.
