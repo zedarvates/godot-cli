@@ -414,8 +414,9 @@ legacy entries and `intended_consumers` hints never count as compatibility.
 
 Inspection does not execute Draft 2020-12, recompute canonical
 `spec_checksum`, detect duplicate JSON keys, validate or instantiate a template,
-migrate content, run Python/Godot, or prove runtime compatibility. Accordingly,
-`template validate`, `instantiate`, and `migrate` are not exposed.
+migrate content, run Python/Godot, or prove runtime compatibility. Use the separate
+[`template validate` command](#strict-template-schema-validation) for supported
+strict schema and spec-checksum validation. `instantiate` and `migrate` remain unavailable.
 
 ### Project test profiles
 
