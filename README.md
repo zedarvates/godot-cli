@@ -425,6 +425,12 @@ not a filesystem transaction or a guarantee against changes after inspection.
 the report. Formatting-only changes alter this fingerprint. It remains present
 when referenced-file inspection is incomplete, but does not confer readiness
 or signature trust. Catalog bytes are separate from `readBudget.consumedBytes`.
+Use `--expected-catalog-sha256 <digest>` to require a previously reviewed
+catalog fingerprint. A mismatch stops before referenced files are opened;
+the option accepts 64 hexadecimal characters in either case. `catalog.pinVerified`
+is true only when a supplied digest matched, independently of completeness or
+consumer readiness. This compares exact bytes, including formatting, and is
+not a signature check; obtaining a trustworthy expected digest is the caller's responsibility.
 
 `--max-read-bytes <bytes>` can lower the default 536,870,912-byte total budget
 for referenced files. Bytes count as soon as they are read, including rejected

@@ -666,9 +666,11 @@ templateRegistryCommands
   .description("Verify catalog, profiles, schemas, checksums, and readiness")
   .argument("<root>", "Explicit local registry root")
   .option("--max-read-bytes <bytes>", "Lower the referenced-file read budget (maximum 536870912)")
-  .action(async (root: string, options: { maxReadBytes?: string }) => {
+  .option("--expected-catalog-sha256 <digest>", "Require an exact catalog SHA-256 before reading referenced files")
+  .action(async (root: string, options: { maxReadBytes?: string; expectedCatalogSha256?: string }) => {
     try {
       const report = await inspectTemplateRegistry({ root,
+        expectedCatalogSha256: options.expectedCatalogSha256,
         maxReadBytes: options.maxReadBytes === undefined ? undefined : Number(options.maxReadBytes) });
       printLocalResult(report);
       if (report.status !== "ok") process.exitCode = 1;

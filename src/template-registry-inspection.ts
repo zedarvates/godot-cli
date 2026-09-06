@@ -40,6 +40,7 @@ const REQUIRED_ENVELOPE_FIELDS = new Set([
 export interface TemplateRegistryInspectionOptions {
   root: string;
   maxReadBytes?: number;
+  expectedCatalogSha256?: string;
 }
 
 export interface RegistryFinding {
@@ -56,6 +57,7 @@ export interface TemplateRegistryInspectionReport {
   catalog: {
     resource: typeof CATALOG_RESOURCE;
     sha256: string;
+    pinVerified: boolean;
     bytes: number;
     registryVersion: string | null;
     entries: number;
@@ -551,6 +553,10 @@ function validateStrictTemplate(
 export async function inspectTemplateRegistry(
   options: TemplateRegistryInspectionOptions
 ): Promise<TemplateRegistryInspectionReport> {
+  const expected = options.expectedCatalogSha256;
+  if (expected !== undefined && (typeof expected !== "string" || !/^[0-9a-fA-F]{64}$/.test(expected))) {
+    throw new Error("expectedCatalogSha256 must contain exactly 64 hexadecimal characters");
+  }
   const maxReadBytes = options.maxReadBytes ?? MAX_REGISTRY_TOTAL_BYTES;
   if (!Number.isInteger(maxReadBytes) || maxReadBytes < 1 || maxReadBytes > MAX_REGISTRY_TOTAL_BYTES) {
     throw new Error(`maxReadBytes must be an integer between 1 and ${MAX_REGISTRY_TOTAL_BYTES}`);
@@ -559,6 +565,9 @@ export async function inspectTemplateRegistry(
   let budgetExhausted = false;
   const root = await requireRegistryRoot(options.root);
   const catalogFile = await readJson(root, CATALOG_RESOURCE, MAX_REGISTRY_CATALOG_BYTES);
+  if (expected !== undefined && catalogFile.sha256 !== expected.toLowerCase()) {
+    throw new Error("Registry catalog SHA-256 does not match expected digest");
+  }
   if (!isRecord(catalogFile.value)) throw new Error("Registry catalog must be an object");
   const catalog = catalogFile.value;
   exactKeys(
@@ -889,6 +898,7 @@ export async function inspectTemplateRegistry(
     catalog: {
       resource: CATALOG_RESOURCE,
       sha256: catalogFile.sha256,
+      pinVerified: expected !== undefined,
       bytes: catalogFile.bytes,
       registryVersion: "2.0.0",
       entries: catalog.entries.length,

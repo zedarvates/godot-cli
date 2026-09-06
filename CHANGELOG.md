@@ -32,6 +32,9 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Added
 
+- `template registry inspect --expected-catalog-sha256` rejects an unexpected
+  catalog snapshot before opening referenced files and reports `catalog.pinVerified`.
+
 - Include `catalog.sha256` and `catalog.bytes` in registry inspection reports,
   identifying the exact catalog snapshot independently of readiness.
 
