@@ -7,11 +7,15 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Added
 
+- Exact safe-integer `spec_checksum` support in `template validate`, with
+  original-token checks and Python/registry serializer parity vectors. Decimal,
+  exponent and out-of-range integer tokens remain unsupported and fail closed.
+
 - `template validate <resource> --registry <root>` evaluates catalogued strict
   templates against their common and family Draft 2020-12 schemas locally.
   Includes bounded worker execution, strict reference/format handling, checksum
   verification, source fingerprints and explicit non-Godot readiness reporting.
-  Numeric spec checksums remain unsupported pending serializer parity.
+  Decimal/exponent spec checksums remain unsupported pending serializer parity.
 
 - `mod manifest inspect <manifest.json>` for bounded local structural checks of
   the Zig2 addon-manifest schema v1, including byte-integrity evidence and

@@ -27,7 +27,10 @@ This keeps costly schema/regex evaluation off the parent event loop but is not
 an OS sandbox. No custom keywords, schema loaders or user JavaScript are installed.
 Ajv runs without data coercion, defaults, property removal or `allErrors`.
 Unknown formats and unsupported schema features reject the operation. Numeric
-specs fail closed until registry checksum serialization parity is established.
+specs support only original integer tokens in JavaScript's exact safe-integer
+range. Decimals, exponent notation and larger integers in the selected template
+are rejected before checksum evaluation; number-looking strings are unaffected.
+This prevents rounded or type-erased values from passing a JavaScript-only digest.
 
 ### Runtime defaults
 
