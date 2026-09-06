@@ -215,6 +215,38 @@ shared family is not a claim that both control planes are behaviorally identical
 MCP tools with bounded JSON/SSE pagination. It never enables a gate or invokes
 an MCP tool.
 
+### Strict template schema validation
+
+```bash
+uo-godot-cli template validate templates/items/test-token/v1.0.0/template.json --registry /path/to/registry
+```
+
+Select an existing catalogued `strict-v1` template by its exact registry-relative
+path. This command first requires an integral registry with strict content,
+then evaluates both the common contract and the selected family schema using
+Draft 2020-12 and the `date-time` format. Schema validity does not require a
+Godot compatibility record. `consumerReady` stays false unless the selected
+template is valid and the registry contains its explicit `godot-vr` record;
+`godotValidation` is always `not_run`.
+
+Catalogued local schema references and the exact common-contract identifier are
+resolved without network retrieval. Unknown keywords/formats, nested schema
+identifiers, dynamic/recursive references and content-encoding keywords fail
+closed. The command never coerces values, inserts defaults or removes fields.
+The selected file and all loaded schemas are fingerprinted again after evaluation.
+
+Limits: 256 KiB per template/schema, 32 schemas, 4,096 schema nodes per file,
+64 JSON levels and 120 seconds overall. The validation worker has a 192 MiB
+old-generation heap limit; this is not an OS sandbox or a total RSS limit.
+`valid: false, complete: true` means a completed schema rejection;
+`complete: false` means the prerequisites or execution failed. Both exit nonzero.
+
+The initial canonical `spec_checksum` implementation supports strings, booleans,
+null, arrays and objects, matching the registry's sorted-key UTF-8 form. Numeric
+spec values are explicitly rejected pending Python/JavaScript serialization
+parity. Dependencies are checked for registry resolution, not recursively schema
+validated by this command. No instantiation, migration or Godot execution occurs.
+
 ### Mod manifest structural inspection
 
 ```bash
@@ -382,8 +414,9 @@ legacy entries and `intended_consumers` hints never count as compatibility.
 
 Inspection does not execute Draft 2020-12, recompute canonical
 `spec_checksum`, detect duplicate JSON keys, validate or instantiate a template,
-migrate content, run Python/Godot, or prove runtime compatibility. Accordingly,
-`template validate`, `instantiate`, and `migrate` are not exposed.
+migrate content, run Python/Godot, or prove runtime compatibility. Use the separate
+[`template validate` command](#strict-template-schema-validation) for supported
+strict schema and spec-checksum validation. `instantiate` and `migrate` remain unavailable.
 
 ### Project test profiles
 
@@ -551,6 +584,7 @@ Only loopback hosts are accepted. `localhost` is resolved and revalidated before
 
 | Gate | Result | Proof boundary |
 |---|---|---|
+| Strict template validation, 2026-09-06 | **177 passed, 0 failed, 0 skipped** with `node --test --test-concurrency=1 test/*.test.mjs` after build | Full configured local suite, including packaged template validation. A separate real strict template passed common/family schema evaluation with unchanged source fingerprints and `consumerReady: false`. Parallel local runs encountered Godot asset-import and Fovea cleanup failures; those are not fixed by this change. Schema validity is not Godot runtime compatibility. |
 | VR request inspection local gate, 2026-09-04 | **168 passed, 0 failed, 0 skipped** | Full local suite with Godot 4.7-dev5, FoveaCore, template registry, addon/replication parity, and authoritative VR grab/release parity 3/3. This proves captured client request structure only, not server acceptance, broadcast, tracking, locomotion, physics outcome, rendering, headset behavior, or production networking. |
 | Replication inspection merged local gate, 2026-09-04 | **156 passed, 0 failed, 0 skipped** | Full local suite with Godot 4.7-dev5, FoveaCore, 6,382-file template registry, addon trust parity, and authoritative `test-replication` 5/5. This proves captured-frame structure only, not authentication, sockets, delivery, interpolation, Godot application, live EntitySync, or production networking. |
 | Asset + Template + Mod merged integration gate, 2026-08-29 | **139 passed, 0 failed, 0 skipped** | Real Godot 4.7-dev5 disposable asset import, FoveaCore bridge, 6,382-file template registry inspection, strict-to-legacy supersession graph, Zig addon-manifest/trust-store parity, package consumer, runtime and scene validation. This remains local development evidence, not GPU, VRAM, visual-quality, collision-quality, performance, production, or OpenXR proof. |

@@ -31,6 +31,7 @@ import {
 import { validateSceneFile } from "./scene-validation.js";
 import { validateAsset } from "./asset-validation.js";
 import { inspectTemplateRegistry } from "./template-registry-inspection.js";
+import { validateTemplate } from "./template-validation.js";
 import { listTestProfiles, runTestProfile } from "./test-runner.js";
 import { inspectModManifest } from "./mod-manifest-inspection.js";
 import { inspectReplicationFrame } from "./network-replication-inspection.js";
@@ -130,6 +131,7 @@ ASSET VALIDATION (local, read-only; optional isolated Godot import)
 
 TEMPLATE REGISTRY (local, read-only; no schema execution)
   template registry inspect <root>          Check catalog, schemas, checksums and readiness
+  template validate <resource> --registry ROOT  Validate a strict template against local schemas
 
 PROJECT TEST PROFILES (local manifest; no shell)
   test list [project]                       List declared profiles and availability
@@ -645,6 +647,19 @@ const templateCommands = program
 const templateRegistryCommands = templateCommands
   .command("registry")
   .description("Inspect a local JSON template registry without executing it");
+
+templateCommands
+  .command("validate")
+  .description("Validate one catalogued strict template against local JSON schemas")
+  .argument("<template>", "Exact registry-relative templates/.../template.json path")
+  .requiredOption("--registry <root>", "Explicit local registry root")
+  .action(async (template: string, options: { registry: string }) => {
+    try {
+      const report = await validateTemplate({ root: options.registry, template });
+      printLocalResult(report);
+      if (!report.valid || !report.complete) process.exitCode = 1;
+    } catch (error) { reportLocalError(error); }
+  });
 
 templateRegistryCommands
   .command("inspect")

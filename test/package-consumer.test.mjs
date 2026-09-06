@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { fixture, TEMPLATE } from "./helpers/template-validation-fixture.mjs";
 
 const PACKAGE_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const NPM_CLI = process.env.npm_execpath;
@@ -70,10 +71,13 @@ test("packed CLI installs and manages its addon outside the source tree", async 
   assert.equal(typeof sourceManifest.dependencies?.commander, "string");
 
   const cliArchive = packPackage(PACKAGE_ROOT, temporaryRoot);
-  const commanderArchive = packPackage(
-    path.join(PACKAGE_ROOT, "node_modules", "commander"),
-    temporaryRoot
-  );
+  const lock = JSON.parse(await fs.readFile(path.join(PACKAGE_ROOT, "package-lock.json"), "utf8"));
+  const dependencyArchives = [];
+  for (const [resource, entry] of Object.entries(lock.packages)) {
+    if (!resource || entry.dev) continue;
+    assert.match(resource, /^node_modules\/(?:@[^/]+\/)?[^/]+$/, "Offline fixture requires a flat production dependency tree");
+    dependencyArchives.push(packPackage(path.join(PACKAGE_ROOT, resource), temporaryRoot));
+  }
 
   const consumer = path.join(temporaryRoot, "consumer");
   const project = path.join(temporaryRoot, "godot-project");
@@ -85,11 +89,12 @@ test("packed CLI installs and manages its addon outside the source tree", async 
       "install",
       "--ignore-scripts",
       "--offline",
+      "--cache", path.join(temporaryRoot, "empty-npm-cache"),
       "--no-audit",
       "--no-fund",
       "--no-save",
       "--package-lock=false",
-      commanderArchive,
+      ...dependencyArchives,
       cliArchive,
     ],
     consumer
@@ -279,6 +284,14 @@ config/name="Package Consumer Test"
   assert.equal(registryReport.status, "ok");
   assert.equal(registryReport.complete, true);
   assert.equal(registryReport.consumerReady, false);
+
+  const strictRegistry = await fixture(t);
+  const templateReport = JSON.parse(runInstalledCli(cliPath,
+    ["template", "validate", TEMPLATE, "--registry", strictRegistry.root], consumer));
+  assert.equal(templateReport.valid, true);
+  assert.equal(templateReport.integrity.unchanged, true);
+  assert.equal(templateReport.consumerReady, false);
+  assert.equal(templateReport.godotValidation, "not_run");
 
   const before = JSON.parse(
     runInstalledCli(cliPath, ["addon", "status", project], consumer)
