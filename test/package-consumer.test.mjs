@@ -71,10 +71,13 @@ test("packed CLI installs and manages its addon outside the source tree", async 
   assert.equal(typeof sourceManifest.dependencies?.commander, "string");
 
   const cliArchive = packPackage(PACKAGE_ROOT, temporaryRoot);
-  const commanderArchive = packPackage(
-    path.join(PACKAGE_ROOT, "node_modules", "commander"),
-    temporaryRoot
-  );
+  const lock = JSON.parse(await fs.readFile(path.join(PACKAGE_ROOT, "package-lock.json"), "utf8"));
+  const dependencyArchives = [];
+  for (const [resource, entry] of Object.entries(lock.packages)) {
+    if (!resource || entry.dev) continue;
+    assert.match(resource, /^node_modules\/(?:@[^/]+\/)?[^/]+$/, "Offline fixture requires a flat production dependency tree");
+    dependencyArchives.push(packPackage(path.join(PACKAGE_ROOT, resource), temporaryRoot));
+  }
 
   const consumer = path.join(temporaryRoot, "consumer");
   const project = path.join(temporaryRoot, "godot-project");
@@ -86,11 +89,12 @@ test("packed CLI installs and manages its addon outside the source tree", async 
       "install",
       "--ignore-scripts",
       "--offline",
+      "--cache", path.join(temporaryRoot, "empty-npm-cache"),
       "--no-audit",
       "--no-fund",
       "--no-save",
       "--package-lock=false",
-      commanderArchive,
+      ...dependencyArchives,
       cliArchive,
     ],
     consumer
