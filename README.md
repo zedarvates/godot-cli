@@ -234,6 +234,9 @@ resolved without network retrieval. Unknown keywords/formats, nested schema
 identifiers, dynamic/recursive references and content-encoding keywords fail
 closed, including inside unused definitions. Vocabulary checks walk schema
 positions only; object keys in `const`, `default` and `examples` remain data.
+Every schema reference is resolved, including in unused definitions. Missing
+fragments, non-schema targets and malformed JSON Pointer escapes fail closed;
+valid escaped/percent-encoded pointers and boolean targets remain supported.
 The command never coerces values, inserts defaults or removes fields.
 The selected file and all loaded schemas are fingerprinted again after evaluation.
 

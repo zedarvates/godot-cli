@@ -107,12 +107,14 @@ function canonicalSpec(value: any): string {
   return JSON.stringify(value);
 }
 
-function prepareSchema(schema: ObjectValue, resource: string, schemas: Map<string, ObjectValue>, ajv: Ajv2020): void {
+function prepareSchema(schema: ObjectValue, resource: string, schemas: Map<string, ObjectValue>, ajv: Ajv2020, schemaNodes: Set<object>): string[] {
   let count = 0;
+  const references = new Set<string>();
   function visit(node: any, top = false): void {
     if (++count > 4096) throw new Error("Schema node limit exceeded");
     if (typeof node === "boolean") return;
     if (!object(node)) throw new Error("Invalid schema node");
+    schemaNodes.add(node);
     // Ajv may not compile unused definitions. Enforce the supported vocabulary
     // across all schema nodes, without interpreting const/default/example data.
     for (const keyword of Object.keys(node)) {
@@ -142,6 +144,16 @@ function prepareSchema(schema: ObjectValue, resource: string, schemas: Map<strin
       if (!target) throw new Error("Schema reference is not a catalogued strict schema");
       node.$ref = target.$id + (fragment === undefined ? "" : `#${fragment}`);
     }
+    if (typeof node.$ref === "string") {
+      const hashIndex = node.$ref.indexOf("#");
+      if (hashIndex !== -1) {
+        const fragment = decodeURIComponent(node.$ref.slice(hashIndex + 1));
+        if (fragment.startsWith("/") && /~(?:[^01]|$)/.test(fragment)) {
+          throw new Error("Invalid JSON Pointer escape in schema reference");
+        }
+      }
+      references.add(node.$ref.startsWith("#") ? schema.$id + node.$ref : node.$ref);
+    }
     for (const key of ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]) {
       if (object(node[key])) for (const child of Object.values(node[key])) visit(child);
     }
@@ -156,6 +168,7 @@ function prepareSchema(schema: ObjectValue, resource: string, schemas: Map<strin
     }
   }
   visit(schema, true);
+  return [...references];
 }
 
 async function execute(options: TemplateValidationOptions): Promise<TemplateValidationReport> {
@@ -199,8 +212,20 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
   const ajv = new Ajv2020({ strict: true, strictTypes: false, allErrors: false, validateFormats: true,
     coerceTypes: false, useDefaults: false, removeAdditional: false, logger: false });
   formats.default(ajv, { formats: ["date-time"] });
-  for (const [resource, schema] of schemas) prepareSchema(schema, resource, schemas, ajv);
+  const references = new Set<string>();
+  const schemaNodes = new Set<object>();
+  for (const [resource, schema] of schemas) {
+    for (const reference of prepareSchema(schema, resource, schemas, ajv, schemaNodes)) references.add(reference);
+  }
   for (const schema of schemas.values()) ajv.addSchema(schema);
+  // Resolving every reference also compiles targets that Ajv would otherwise
+  // leave lazy because their containing definition is unused by this template.
+  for (const reference of references) {
+    const target = ajv.getSchema(reference);
+    if (!target || (typeof target.schema !== "boolean" && !schemaNodes.has(target.schema))) {
+      throw new Error("Schema reference target is missing or is not a schema node");
+    }
+  }
   const findings: TemplateValidationReport["findings"] = [];
   for (const schema of [schemas.get(COMMON)!, family]) {
     const validate = ajv.getSchema(schema.$id)!;

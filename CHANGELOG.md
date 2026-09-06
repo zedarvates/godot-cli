@@ -7,6 +7,9 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Fixed
 
+- Resolve every schema reference, including unused definitions, and reject
+  missing fragments, non-schema targets and malformed JSON Pointer escapes.
+
 - Check schema keywords and formats in unused definitions before compilation;
   keep annotation and constant data outside schema-vocabulary traversal.
 - Count boolean schemas toward the 4,096-node schema traversal limit.

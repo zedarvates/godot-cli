@@ -28,7 +28,9 @@ an OS sandbox. No custom keywords, schema loaders or user JavaScript are install
 Ajv runs without data coercion, defaults, property removal or `allErrors`.
 Unknown formats and unsupported schema features reject the operation. Schema
 vocabulary checks also inspect unused schema definitions before compilation;
-`const`, `default` and `examples` values are not interpreted as schema nodes. Numeric
+`const`, `default` and `examples` values are not interpreted as schema nodes. Every schema reference must resolve to
+a compilable schema even when unused. JSON Pointer escapes are checked before
+resolution; this never adds a remote schema loader. Numeric
 specs support only original integer tokens in JavaScript's exact safe-integer
 range. Decimals, exponent notation and larger integers in the selected template
 are rejected before checksum evaluation; number-looking strings are unaffected.
