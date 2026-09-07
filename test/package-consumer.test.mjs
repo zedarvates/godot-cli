@@ -287,8 +287,10 @@ config/name="Package Consumer Test"
 
   const strictRegistry = await fixture(t);
   const templateReport = JSON.parse(runInstalledCli(cliPath,
-    ["template", "validate", TEMPLATE, "--registry", strictRegistry.root], consumer));
+    ["template", "validate", TEMPLATE, "--registry", strictRegistry.root, "--with-dependencies"], consumer));
   assert.equal(templateReport.valid, true);
+  assert.equal(templateReport.dependencyClosureChecked, true);
+  assert.deepEqual(templateReport.templateChecks, [{ resource: TEMPLATE, valid: true }]);
   assert.equal(templateReport.integrity.unchanged, true);
   assert.equal(templateReport.consumerReady, false);
   assert.equal(templateReport.godotValidation, "not_run");

@@ -6,7 +6,7 @@ import { assertUniqueJsonKeys } from "./json-keys.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import formats from "ajv-formats";
 import { inspectTemplateRegistry } from "./template-registry-inspection.js";
-import { validationFailure, type TemplateValidationOptions, type TemplateValidationReport } from "./template-validation.js";
+import { MAX_VALIDATION_TEMPLATES, validationFailure, type TemplateValidationOptions, type TemplateValidationReport } from "./template-validation.js";
 
 const CATALOG = "templates/catalog.json";
 const COMMON = "templates/schemas/template-contract/v1.0.0/schema.json";
@@ -191,12 +191,33 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
   const entries = catalog.value.entries as ObjectValue[];
   const entry = entries.find(e => e.file === options.template);
   if (!entry || entry.validation_profile !== "strict-v1") throw new Error("Selected resource is not a catalogued strict-v1 template");
-  const template = await read(root, options.template, 256 * 1024);
-  if (template.sha256 !== entry.sha256) throw new Error("Template checksum mismatch");
-  if (!template.exactIntegerTokens) {
-    throw new Error("Numeric spec requires safe integer tokens without decimals or exponents");
+  async function loadTemplate(entry: ObjectValue) {
+    const file = await read(root, entry.file, 256 * 1024);
+    if (file.sha256 !== entry.sha256) throw new Error(`Template checksum mismatch: ${entry.file}`);
+    if (!file.exactIntegerTokens) throw new Error(`Numeric spec requires safe integer tokens without decimals or exponents: ${entry.file}`);
+    return file;
   }
-  const snapshots = [catalog, template];
+  const template = await loadTemplate(entry);
+  const documents = [{ entry, file: template }];
+  if (options.withDependencies) {
+    const byIdentity = new Map(entries.filter(e => e.validation_profile === "strict-v1")
+      .map(e => [`${e.id}@${e.version}`, e]));
+    const seen = new Set<string>([entry.file]);
+    // Iterative traversal: shared references and cycles never duplicate work.
+    for (let cursor = 0; cursor < documents.length; cursor++) {
+      for (const reference of documents[cursor].file.value.dependencies) {
+        const dependency = byIdentity.get(reference);
+        if (!dependency) throw new Error("Dependency must resolve to an exact strict template version");
+        if (seen.has(dependency.file)) continue;
+        if (documents.length === MAX_VALIDATION_TEMPLATES) {
+          throw new Error(`Dependency validation exceeds ${MAX_VALIDATION_TEMPLATES} templates including the root`);
+        }
+        seen.add(dependency.file);
+        documents.push({ entry: dependency, file: await loadTemplate(dependency) });
+      }
+    }
+  }
+  const snapshots = [catalog, ...documents.map(d => d.file)];
   const schemas = new Map<string, ObjectValue>();
   const schemaEntries = entries.filter(e => e.validation_profile === "strict-schema-v1");
   if (schemaEntries.length > 32) throw new Error("Schema count limit exceeded");
@@ -209,13 +230,7 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
     schemas.set(entry.file, structuredClone(file.value));
     snapshots.push(file);
   }
-  const family = schemas.get(entry.schema_file);
-  if (!family || !schemas.has(COMMON)) throw new Error("Family or common schema is missing");
-  const doc = template.value;
-  if (!entry.schema_file.startsWith(`templates/schemas/${doc.family}/v`)) throw new Error("Selected schema belongs to another family");
-  const expectedSchema = path.posix.relative(path.posix.dirname(options.template), entry.schema_file);
-  if (doc.$schema !== expectedSchema && doc.$schema !== family.$id) throw new Error("Template schema disagrees with its catalogued family");
-  if (`sha256:${hash(canonicalSpec(doc.spec))}` !== doc.spec_checksum) throw new Error("Spec checksum mismatch");
+  if (!schemas.has(COMMON)) throw new Error("Common schema is missing");
   const ajv = new Ajv2020({ strict: true, strictTypes: false, allErrors: false, validateFormats: true,
     coerceTypes: false, useDefaults: false, removeAdditional: false, logger: false });
   formats.default(ajv, { formats: ["date-time"] });
@@ -234,23 +249,39 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
     }
   }
   const findings: TemplateValidationReport["findings"] = [];
-  for (const schema of [schemas.get(COMMON)!, family]) {
-    const validate = ajv.getSchema(schema.$id)!;
-    if (!validate(doc)) {
-      const error = validate.errors?.[0];
-      findings.push({ code: "TEMPLATE_SCHEMA_INVALID", location: (error?.instancePath ?? "").slice(0, 512),
-        message: `${error?.keyword ?? "validation"}: ${error?.message ?? "schema rejected template"}`.slice(0, 1024) });
-      break;
+  const templateChecks: TemplateValidationReport["templateChecks"] = [];
+  for (const { entry, file } of documents) {
+    const doc = file.value;
+    const family = schemas.get(entry.schema_file);
+    if (!family) throw new Error(`Family schema is missing: ${file.resource}`);
+    if (!entry.schema_file.startsWith(`templates/schemas/${doc.family}/v`)) throw new Error(`Selected schema belongs to another family: ${file.resource}`);
+    const expectedSchema = path.posix.relative(path.posix.dirname(file.resource), entry.schema_file);
+    if (doc.$schema !== expectedSchema && doc.$schema !== family.$id) throw new Error(`Template schema disagrees with its catalogued family: ${file.resource}`);
+    if (`sha256:${hash(canonicalSpec(doc.spec))}` !== doc.spec_checksum) throw new Error(`Spec checksum mismatch: ${file.resource}`);
+    let valid = true;
+    for (const schema of [schemas.get(COMMON)!, family]) {
+      const validate = ajv.getSchema(schema.$id)!;
+      if (!validate(doc)) {
+        valid = false;
+        const error = validate.errors?.[0];
+        findings.push({ code: "TEMPLATE_SCHEMA_INVALID", location: (error?.instancePath ?? "").slice(0, 512),
+          message: `${error?.keyword ?? "validation"}: ${error?.message ?? "schema rejected template"}`.slice(0, 1024),
+          ...(options.withDependencies ? { resource: file.resource } : {}) });
+        break;
+      }
     }
+    templateChecks.push({ resource: file.resource, valid });
   }
   for (const snapshot of snapshots) {
     if ((await read(root, snapshot.resource, snapshot.limit)).sha256 !== snapshot.sha256) throw new Error("Source changed during validation");
   }
   const valid = findings.length === 0;
   return { status: valid ? "ok" : "error", valid, complete: true, template: options.template,
+    dependencyClosureChecked: options.withDependencies === true, templateChecks,
     catalogPinVerified: pin !== undefined,
     registryReadBudget: inspection.readBudget,
-    consumerReady: valid && inspection.consumerReady && doc.compatibility.some((c: ObjectValue) => c.consumer === "godot-vr"), godotValidation: "not_run",
+    consumerReady: valid && inspection.consumerReady && documents.every(({ file }) =>
+      file.value.compatibility.some((c: ObjectValue) => c.consumer === "godot-vr")), godotValidation: "not_run",
     integrity: { unchanged: true, files: snapshots.map(({ resource, sha256 }) => ({ resource, sha256 })) }, findings };
 }
 
