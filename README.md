@@ -454,6 +454,13 @@ not fit. Such a stop returns a failing exit status and false readiness. Reaching
 the exact limit on the final file is allowed. Counts in an incomplete report
 describe only entries processed before the stop.
 
+Diagnostics are bounded during collection, not just when printed: at most 256
+entries, 1,024 UTF-16 code units per message and 512 per location. `findingCount`
+counts all original findings; `findingsTruncated` indicates omitted findings or
+shortened text. When truncation occurs, one retained slot contains
+`REGISTRY_FINDINGS_TRUNCATED` (excluded from `findingCount`) and readiness stays
+false. The first encountered findings are retained and then sorted for output.
+
 Readiness is deliberately layered. `integrityReady` means the bounded
 inspection completed without error. `strictContentReady` additionally requires
 at least one verified strict family schema and linked `strict-v1` template.
