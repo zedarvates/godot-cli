@@ -36,6 +36,10 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Added
 
+- `template validate --with-dependencies` validates an exact-version dependency
+  closure of at most 128 templates, reports per-file results, and retains the
+  existing read-only, checksum, numeric and execution-budget boundaries.
+
 - `template validate --registry-max-read-bytes` lowers the registry inspection
   phase's read ceiling and reports `registryReadBudget`, including rejected bytes.
 

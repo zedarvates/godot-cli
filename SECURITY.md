@@ -36,8 +36,11 @@ The selected document and schema reads reject symbolic path components,
 duplicate JSON keys, non-finite numbers, invalid UTF-8 and oversized input.
 Files are bounded during reading, hashed against the catalog and rechecked
 after evaluation. These checks detect drift; they do not create a filesystem
-transaction or verify signatures. Dependency identities are inspected, while
-recursive dependency schema validation remains outside this command.
+transaction or verify signatures. Dependency identities are inspected by default.
+Opt-in `--with-dependencies` schema-validates the exact-version transitive closure,
+with at most 128 templates including the root and one visit per resource. Every
+loaded template is fingerprinted and checked against its own family schema.
+Closure validity does not prove dependency execution or instantiation safety.
 
 Compilation and validation run in a disposable worker with a 120-second parent
 deadline and 192 MiB old-generation heap limit (not a total process RSS bound).

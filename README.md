@@ -243,6 +243,23 @@ registry-prerequisite failures; null means accounting is unavailable.
 This is not a whole-command I/O cap: catalog reads and the separately bounded
 template/schema snapshot reads and final fingerprint checks remain additional.
 
+`--with-dependencies` additionally validates the transitive closure of exact
+`family:slug@version` dependencies against each template's common and family
+schemas. The closure is limited to 128 templates including the selected root;
+shared references and cycles are visited once in dependency-array order. No
+aliases or version ranges are substituted. Every loaded template gets the same
+file/spec checksum, numeric-token and final fingerprint checks as the root.
+
+`templateChecks` lists per-file schema results and `dependencyClosureChecked`
+is true only after the requested closure and integrity checks finish (even if
+some schemas rejected their documents). Missing references, read/checksum errors
+and limit failures remain incomplete. Schema rejection yields `valid: false`;
+`consumerReady` requires compatibility records for every checked template.
+Cycles being inspectable does not prove that they can be instantiated. This
+option does not execute Godot or dependency scripts. Existing worker time/memory
+limits cover the entire operation; registry pin/budget options retain their
+phase-specific scope.
+
 Catalogued local schema references and the exact common-contract identifier are
 resolved without network retrieval. Unknown keywords/formats, nested schema
 identifiers, dynamic/recursive references and content-encoding keywords fail
@@ -269,8 +286,8 @@ that range fail closed because parsing can erase Python's numeric distinctions.
 The same numeric-token restriction applies to every loaded schema, including
 numeric bounds, constants and annotations. This prevents schema limits from
 silently rounding before evaluation. Decimal schema limits are unsupported.
-Dependencies are checked for registry resolution, not recursively schema
-validated by this command. No instantiation, migration or Godot execution occurs.
+Without `--with-dependencies`, dependencies are checked for registry resolution
+only. No instantiation, migration or Godot execution occurs.
 
 ### Mod manifest structural inspection
 
