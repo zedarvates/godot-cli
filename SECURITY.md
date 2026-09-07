@@ -16,6 +16,13 @@ The referenced-file budget charges all bytes read, including failed parses and
 checksum mismatches. Inspection stops when the next file cannot fit; the CLI
 can lower but never raise the 512 MiB ceiling. The catalog has a separate cap.
 
+Registry diagnostics retain at most 256 entries while inspection runs. Message
+and location text are capped at 1,024 and 512 UTF-16 code units respectively.
+Overflow or text clipping is explicit through `findingsTruncated` and a
+`REGISTRY_FINDINGS_TRUNCATED` error marker; `findingCount` excludes that marker.
+Truncation prevents a successful readiness result and does not stop the remaining
+inspection checks within their separate budgets.
+
 ### Strict template validation
 
 `template validate` only evaluates catalogued strict-v1 documents from an

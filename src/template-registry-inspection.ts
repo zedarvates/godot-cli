@@ -9,6 +9,8 @@ export const MAX_REGISTRY_TOTAL_BYTES = 512 * 1024 * 1024;
 export const MAX_REGISTRY_ENTRIES = 10_000;
 export const MAX_REGISTRY_ALIASES = 10_000;
 export const MAX_REGISTRY_FINDINGS = 256;
+export const MAX_REGISTRY_FINDING_MESSAGE_CHARS = 1024;
+export const MAX_REGISTRY_FINDING_LOCATION_CHARS = 512;
 export const MAX_REGISTRY_JSON_DEPTH = 64;
 export const MAX_REGISTRY_JSON_ARRAY_ITEMS = 20_000;
 export const MAX_REGISTRY_JSON_STRING_BYTES = 1024 * 1024;
@@ -84,6 +86,8 @@ export interface TemplateRegistryInspectionReport {
   readBudget: { limitBytes: number; consumedBytes: number; exhausted: boolean };
   reasons: string[];
   findings: RegistryFinding[];
+  findingCount: number;
+  findingsTruncated: boolean;
   boundaries: string[];
 }
 
@@ -591,6 +595,25 @@ export async function inspectTemplateRegistry(
   }
 
   const findings: RegistryFinding[] = [];
+  let findingCount = 0;
+  let findingsTruncated = false;
+  let hasChecksumFinding = false;
+  const addFinding = (finding: RegistryFinding): void => {
+    findingCount += 1;
+    // Keep semantic state independent of the bounded diagnostic sample.
+    if (finding.location.includes("sha256")) hasChecksumFinding = true;
+    if (finding.message.length > MAX_REGISTRY_FINDING_MESSAGE_CHARS ||
+        finding.location.length > MAX_REGISTRY_FINDING_LOCATION_CHARS) {
+      findingsTruncated = true;
+    }
+    if (findings.length === MAX_REGISTRY_FINDINGS) {
+      findingsTruncated = true;
+      return;
+    }
+    findings.push({ ...finding,
+      message: finding.message.slice(0, MAX_REGISTRY_FINDING_MESSAGE_CHARS),
+      location: finding.location.slice(0, MAX_REGISTRY_FINDING_LOCATION_CHARS) });
+  };
   const profiles: TemplateRegistryInspectionReport["profiles"] = {
     "legacy-unvalidated": 0,
     "strict-schema-v1": 0,
@@ -619,7 +642,7 @@ export async function inspectTemplateRegistry(
       );
       const actualChecksum = file.sha256;
       if (actualChecksum !== entry.sha256) {
-        findings.push({
+        addFinding({
           severity: "error",
           code: "REGISTRY_CHECKSUM_MISMATCH",
           location: `/entries/${index}/sha256`,
@@ -630,7 +653,7 @@ export async function inspectTemplateRegistry(
       verifiedBytes += file.bytes;
       verified.push({ entry, resource, value: file.value, bytes: file.bytes });
     } catch (error) {
-      findings.push({
+      addFinding({
         severity: "error",
         code:
           error instanceof Error && /path|outside|escape|segment|percent/i.test(error.message)
@@ -658,15 +681,15 @@ export async function inspectTemplateRegistry(
       validateCommonSchema(verifiedContract.value);
       contractReady = true;
     } catch (error) {
-      findings.push({
+      addFinding({
         severity: "error",
         code: "REGISTRY_CONTRACT_INVALID",
         location: CONTRACT_RESOURCE,
         message: error instanceof Error ? error.message : String(error),
       });
     }
-  } else if (!findings.some((finding) => finding.location.includes("sha256"))) {
-    findings.push({
+  } else if (!hasChecksumFinding) {
+    addFinding({
       severity: "error",
       code: "REGISTRY_CONTRACT_INVALID",
       location: CONTRACT_RESOURCE,
@@ -691,7 +714,7 @@ export async function inspectTemplateRegistry(
       strictFamilySchemas += 1;
       validFamilySchemaResources.add(item.resource);
     } catch (error) {
-      findings.push({
+      addFinding({
         severity: "error",
         code: "REGISTRY_SCHEMA_INVALID",
         location: item.resource,
@@ -731,7 +754,7 @@ export async function inspectTemplateRegistry(
       }
       legacyDocuments.set(source, item);
     } catch (error) {
-      findings.push({
+      addFinding({
         severity: "error",
         code: "REGISTRY_REFERENCE_MISSING",
         location: item.resource,
@@ -748,7 +771,7 @@ export async function inspectTemplateRegistry(
       if (compatible) godotCompatibleTemplates += 1;
       strictDocuments.set(`${item.entry.id}@${item.entry.version}`, item);
     } catch (error) {
-      findings.push({
+      addFinding({
         severity: "error",
         code: "REGISTRY_STRICT_TEMPLATE_INVALID",
         location: item.resource,
@@ -767,7 +790,7 @@ export async function inspectTemplateRegistry(
       const seen = new Set<string>();
       for (const reference of references) {
         if (typeof reference !== "string" || !referencePattern.test(reference)) {
-          findings.push({
+          addFinding({
             severity: "error",
             code: "REGISTRY_REFERENCE_MISSING",
             location: item.resource,
@@ -783,7 +806,7 @@ export async function inspectTemplateRegistry(
           !legacyDocuments.has(reference) ||
           target?.entry.superseded_by === source;
         if (seen.has(reference) || reference === source || target === undefined || !reciprocalLegacyLink) {
-          findings.push({
+          addFinding({
             severity: "error",
             code: "REGISTRY_REFERENCE_MISSING",
             location: item.resource,
@@ -801,7 +824,7 @@ export async function inspectTemplateRegistry(
         successor === source ||
         !strictDocuments.has(successor))
     ) {
-      findings.push({
+      addFinding({
         severity: "error",
         code: "REGISTRY_REFERENCE_MISSING",
         location: item.resource,
@@ -818,7 +841,7 @@ export async function inspectTemplateRegistry(
       !Array.isArray(target.entry.supersedes) ||
       !target.entry.supersedes.includes(source)
     ) {
-      findings.push({
+      addFinding({
         severity: "error",
         code: "REGISTRY_REFERENCE_MISSING",
         location: item.resource,
@@ -846,7 +869,7 @@ export async function inspectTemplateRegistry(
       }
       aliases.set(source, target);
     } catch (error) {
-      findings.push({
+      addFinding({
         severity: "error",
         code: "REGISTRY_REFERENCE_MISSING",
         location: `/aliases/${index}`,
@@ -861,7 +884,7 @@ export async function inspectTemplateRegistry(
     while (current !== undefined && aliases.has(current)) {
       const position = positions.get(current);
       if (position !== undefined) {
-        findings.push({
+        addFinding({
           severity: "error",
           code: "REGISTRY_ALIAS_CYCLE",
           location: "/aliases",
@@ -875,6 +898,11 @@ export async function inspectTemplateRegistry(
     }
   }
 
+  if (findingsTruncated) {
+    if (findings.length === MAX_REGISTRY_FINDINGS) findings.pop();
+    findings.push({ severity: "error", code: "REGISTRY_FINDINGS_TRUNCATED", location: "/findings",
+      message: "Registry diagnostics exceeded count or text limits; messages were omitted or shortened" });
+  }
   findings.sort((left, right) =>
     left.code.localeCompare(right.code) ||
     left.location.localeCompare(right.location) ||
@@ -920,7 +948,9 @@ export async function inspectTemplateRegistry(
     consumerReady,
     readBudget: { limitBytes: maxReadBytes, consumedBytes: maxReadBytes - budget.remaining, exhausted: budgetExhausted },
     reasons,
-    findings: findings.slice(0, MAX_REGISTRY_FINDINGS),
+    findings,
+    findingCount,
+    findingsTruncated,
     boundaries: [BOUNDARY],
   };
 }
