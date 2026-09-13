@@ -22,7 +22,7 @@ async function createProject(context) {
 }
 
 function buildGlb(document) {
-  const json = Buffer.from(JSON.stringify(document), "utf8");
+  const json = Buffer.isBuffer(document) ? document : Buffer.from(JSON.stringify(document), "utf8");
   const paddedLength = Math.ceil(json.length / 4) * 4;
   const chunk = Buffer.alloc(paddedLength, 0x20);
   json.copy(chunk);
@@ -99,6 +99,62 @@ test("static validation accepts a minimal project-local glTF 2.0 asset", async (
   assert.equal(report.evidence.lod.status, "unknown");
   assert.equal(report.evidence.collision.status, "unknown");
   assert.equal(report.integrity.unchanged, true);
+});
+
+test("asset JSON rejects duplicate decoded keys in glTF and GLB", async (t) => {
+  const project = await createProject(t);
+  for (const text of [
+    '{"asset":{"version":"1.0","version":"2.0"}}',
+    '{"asset":{"version":"2.0"},"extras":{"name":"a","na\\u006de":"b"}}',
+    '{"asset":{"version":"2.0"},"extras":[{"x":1,"x":2}]}',
+  ]) {
+    for (const extension of ['gltf', 'glb']) {
+      const raw = Buffer.from(text);
+      const bytes = extension === 'glb' ? buildGlb(raw) : raw;
+      await fs.writeFile(path.join(project, `model.${extension}`), bytes);
+      const r = await validateAsset({ project, asset: `res://model.${extension}`, env: {} });
+      assert.equal(r.valid, false);
+      assert.ok(r.findings.some(f => /Duplicate JSON key/.test(f.message)));
+      assert.equal(r.proof.godotImport.status, 'not_requested');
+      assert.deepEqual(await fs.readFile(path.join(project, `model.${extension}`)), bytes);
+    }
+  }
+});
+
+test("asset JSON rejects malformed UTF-8 in glTF and GLB strings", async (t) => {
+  const project = await createProject(t);
+  const raw = Buffer.concat([Buffer.from('{"asset":{"version":"2.0"},"extras":{"name":"'), Buffer.from([0xc3, 0x28]), Buffer.from('"}}')]);
+  for (const extension of ['gltf', 'glb']) {
+    await fs.writeFile(path.join(project, `model.${extension}`), extension === 'glb' ? buildGlb(raw) : raw);
+    const r = await validateAsset({ project, asset: `res://model.${extension}`, env: {} });
+    assert.equal(r.valid, false);
+    assert.ok(r.findings.some(f => /UTF-8|encoded data/.test(f.message)));
+  }
+});
+
+test("asset policy rejects duplicate keys and malformed UTF-8 instead of weakening constraints", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"}}');
+  for (const raw of [
+    Buffer.from('{"schema":"uo-godot-asset-policy/1","require_godot_import":true,"require_godot_import":false}'),
+    Buffer.from('{"schema":"uo-godot-asset-policy/1","max_meshes":0,"max_me\\u0073hes":10}'),
+    Buffer.concat([Buffer.from('{"schema":"uo-godot-asset-policy/1","'), Buffer.from([0xc3, 0x28]), Buffer.from('":false}')]),
+  ]) {
+    await fs.writeFile(path.join(project, 'policy.json'), raw);
+    const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+    assert.equal(r.valid, false);
+    assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_INVALID' && /Duplicate JSON key|UTF-8|encoded data/.test(f.message)));
+  }
+});
+
+test("asset JSON preserves valid Unicode and permits repeated keys in separate objects", async (t) => {
+  const project = await createProject(t);
+  const document = { asset: { version: '2.0' }, extras: [{ name: 'Épée 🗡️' }, { name: '{"name": "data"}' }] };
+  for (const extension of ['gltf', 'glb']) {
+    await fs.writeFile(path.join(project, `model.${extension}`), extension === 'glb' ? buildGlb(document) : JSON.stringify(document));
+    const r = await validateAsset({ project, asset: `res://model.${extension}`, env: {} });
+    assert.equal(r.valid, true, JSON.stringify(r.findings));
+  }
 });
 
 test("asset root resolution rejects traversal and unsupported extensions before parsing", async (t) => {
