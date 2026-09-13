@@ -260,6 +260,15 @@ option does not execute Godot or dependency scripts. Existing worker time/memory
 limits cover the entire operation; registry pin/budget options retain their
 phase-specific scope.
 
+`--timeout-ms <ms>` lowers the validation worker deadline to an integer from
+1 to 120000 milliseconds (default: 120000). It covers registry inspection,
+schema compilation, optional dependency validation and final integrity checks
+together, not a fresh deadline per file. Invalid values return
+`TEMPLATE_LIMIT_INVALID`; expiration terminates the worker and returns
+`TEMPLATE_TIMEOUT`, `valid: false`, `complete: false`, `consumerReady: false`
+and exit status 1. CLI startup and worker termination overhead are additional;
+this is not a hard real-time guarantee. No partial result authorizes consumption.
+
 Catalogued local schema references and the exact common-contract identifier are
 resolved without network retrieval. Unknown keywords/formats, nested schema
 identifiers, dynamic/recursive references and content-encoding keywords fail

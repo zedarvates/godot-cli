@@ -656,10 +656,12 @@ templateCommands
   .option("--expected-catalog-sha256 <digest>", "Require the reviewed catalog SHA-256 for validation")
   .option("--registry-max-read-bytes <bytes>", "Lower the referenced-file budget of registry inspection (maximum 536870912)")
   .option("--with-dependencies", "Validate the exact-version dependency closure (maximum 128 templates)")
-  .action(async (template: string, options: { registry: string; expectedCatalogSha256?: string; registryMaxReadBytes?: string; withDependencies?: boolean }) => {
+  .option("--timeout-ms <ms>", "Lower the validation worker time limit (integer 1-120000; default 120000)")
+  .action(async (template: string, options: { registry: string; expectedCatalogSha256?: string; registryMaxReadBytes?: string; withDependencies?: boolean; timeoutMs?: string }) => {
     try {
       const report = await validateTemplate({ root: options.registry, template,
         withDependencies: options.withDependencies,
+        timeoutMs: options.timeoutMs === undefined ? undefined : Number(options.timeoutMs),
         expectedCatalogSha256: options.expectedCatalogSha256,
         registryMaxReadBytes: options.registryMaxReadBytes === undefined ? undefined : Number(options.registryMaxReadBytes) });
       printLocalResult(report);

@@ -5,6 +5,12 @@ pre-release versions until the public API and operational boundary are stable.
 
 ## Unreleased
 
+### Added
+
+- Expose the existing strict-validation worker deadline as
+  `template validate --timeout-ms` (1-120000 ms), including dependency closure
+  validation. The default remains 120000 ms; expiration fails closed.
+
 ### Fixed
 
 - Bound registry diagnostics during collection, cap individual message/location
