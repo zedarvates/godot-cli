@@ -513,6 +513,76 @@ test("static validation reads bounded PNG and JPEG dimensions without decoding p
   ]);
 });
 
+test("image header reads assemble short PNG and JPEG reads while retaining the 64 KiB cap", async (t) => {
+  const project = await createProject(t);
+  const png = Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,
+    0,0,0,13,0x49,0x48,0x44,0x52,0,0,0,2,0,0,0,3]);
+  const jpeg = Buffer.from([0xff,0xd8,0xff,0xc0,0,0x0b,8,0,5,0,4,1,1,0x11,0,0xff,0xd9]);
+  const vectors = [
+    ['small.png', png, 3, 2, 3, 24],
+    ['small.jpg', jpeg, 3, 4, 5, 17],
+    ['large.png', Buffer.concat([png, Buffer.alloc(128 * 1024)]), 8192, 2, 3, 65536],
+  ];
+  const targets = new Map();
+  for (const [name, bytes, chunk] of vectors) {
+    const file = path.join(project, name);
+    await fs.writeFile(file, bytes);
+    targets.set(await fs.realpath(file), { chunk, bytesRead: 0 });
+  }
+  const open = fs.open.bind(fs);
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args);
+    const target = targets.get(args[0]);
+    if (target) {
+      const read = handle.read.bind(handle);
+      handle.read = async (buffer, offset, length, position) => {
+        const result = await read(buffer, offset, Math.min(length, target.chunk), position);
+        target.bytesRead += result.bytesRead;
+        return result;
+      };
+    }
+    return handle;
+  });
+  await fs.writeFile(path.join(project, 'model.gltf'), JSON.stringify({
+    asset: { version: '2.0' }, images: vectors.map(([uri]) => ({ uri })),
+  }));
+  await fs.writeFile(path.join(project, 'policy.json'), '{"schema":"uo-godot-asset-policy/1","max_image_dimension":5}');
+  const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+  assert.equal(r.valid, true, JSON.stringify(r.findings));
+  assert.equal(r.policy.passed, true);
+  for (const [i, [name, , , width, height, readBytes]] of vectors.entries()) {
+    assert.equal(r.images[i].width, width);
+    assert.equal(r.images[i].height, height);
+    assert.equal(targets.get(await fs.realpath(path.join(project, name))).bytesRead, readBytes);
+  }
+});
+
+test("image header reader stops at EOF without inventing missing dimensions", async (t) => {
+  const project = await createProject(t);
+  const file = path.join(project, 'partial.png');
+  await fs.writeFile(file, Buffer.alloc(24));
+  const canonical = await fs.realpath(file);
+  const open = fs.open.bind(fs);
+  let reads = 0;
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === canonical) {
+      const read = handle.read.bind(handle);
+      handle.read = async (buffer, offset, length, position) => {
+        reads++;
+        if (reads > 1) return { bytesRead: 0, buffer };
+        return read(buffer, offset, Math.min(length, 3), position);
+      };
+    }
+    return handle;
+  });
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"},"images":[{"uri":"partial.png"}]}');
+  const r = await validateAsset({ project, asset: 'res://model.gltf', env: {} });
+  assert.equal(r.images[0].width, null);
+  assert.equal(r.images[0].height, null);
+  assert.ok(reads <= 2);
+});
+
 test("static validation derives triangle-list metrics from accessor counts", async (t) => {
   const project = await createProject(t);
   await fs.writeFile(
