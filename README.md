@@ -446,6 +446,12 @@ project.
 
 Performance limits are enforced only through a closed, versioned
 `uo-godot-asset-policy/1` JSON file; the CLI does not invent a headset budget.
+When `max_image_dimension` is set, every declared image needs known width and
+height. Unknown measurements (including unsupported, embedded or unreadable
+image headers) fail the policy with `ASSET_POLICY_MEASUREMENT_UNKNOWN` and exit
+code 1; requesting Godot import cannot override this static rejection. Without
+that rule, unknown dimensions retain their advisory behavior. These measurements
+come from bounded headers, not pixel decoding or image-quality certification.
 `--godot-import` copies the already validated closure to a disposable project,
 runs Godot headlessly with XR disabled and a reduced environment, then reports
 loaded node/mesh/material/animation/skeleton/body/collision counts. Collision

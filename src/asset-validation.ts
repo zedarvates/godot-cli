@@ -1206,9 +1206,18 @@ function applyPolicy(
   }
   if (typeof policy.max_image_dimension === "number") {
     for (const [index, image] of images.entries()) {
+      if (image.width === null || image.height === null) {
+        findings.push({
+          severity: "error",
+          code: "ASSET_POLICY_MEASUREMENT_UNKNOWN",
+          location: `/images/${index}`,
+          message: "Cannot verify max_image_dimension because image dimensions are unknown",
+        });
+        continue;
+      }
       if (
-        (image.width !== null && image.width > policy.max_image_dimension) ||
-        (image.height !== null && image.height > policy.max_image_dimension)
+        image.width > policy.max_image_dimension ||
+        image.height > policy.max_image_dimension
       ) {
         findings.push({
           severity: "error",
