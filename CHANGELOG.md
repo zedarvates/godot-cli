@@ -17,6 +17,9 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Fixed
 
+- Bound asset-policy reads to their initial size plus one byte, enforce the
+  1 MiB ceiling on the opened file and reject observed read-time changes.
+
 - Reject duplicate decoded JSON keys and malformed UTF-8 in glTF, GLB JSON
   chunks and asset policies instead of silently accepting replacement values.
 

@@ -1098,7 +1098,34 @@ async function loadPolicy(
   ) {
     throw new Error("Asset policy resolves outside the Godot project");
   }
-  const parsed = parseAssetJson(await fs.readFile(canonical));
+  const handle = await fs.open(canonical, "r");
+  let bytes: Buffer;
+  try {
+    const before = await handle.stat();
+    const matches = (observed: typeof before) => observed.isFile() && !observed.isSymbolicLink() &&
+      observed.dev === before.dev && observed.ino === before.ino &&
+      observed.size === before.size && observed.mtimeMs === before.mtimeMs &&
+      observed.ctimeMs === before.ctimeMs;
+    if (!before.isFile() || before.size > MAX_ASSET_JSON_STRING_BYTES) {
+      throw new Error("Asset policy exceeds the 1 MiB limit or is not a regular file");
+    }
+    if (!matches(stat)) throw new Error("Asset policy changed before reading");
+    // One extra byte detects growth without reading an unbounded replacement.
+    const buffer = Buffer.alloc(before.size + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const result = await handle.read(buffer, size, buffer.length - size, null);
+      if (result.bytesRead === 0) break;
+      size += result.bytesRead;
+    }
+    if (size !== before.size || !matches(await handle.stat()) || !matches(await fs.lstat(canonical))) {
+      throw new Error("Asset policy changed during reading");
+    }
+    bytes = buffer.subarray(0, size);
+  } finally {
+    await handle.close();
+  }
+  const parsed = parseAssetJson(bytes);
   if (!isRecord(parsed) || parsed.schema !== "uo-godot-asset-policy/1") {
     throw new Error("Asset policy schema must be uo-godot-asset-policy/1");
   }

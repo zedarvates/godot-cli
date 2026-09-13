@@ -435,7 +435,10 @@ uo-godot-cli asset validate res://assets/model.gltf --project /path/to/game \
 `asset validate` is a local, read-only validator for one regular project-local
 glTF 2.0 `.gltf` or `.glb`. Asset JSON and policy files reject malformed UTF-8
 and duplicate decoded object keys, including escaped aliases; repeated keys
-in distinct objects remain valid. It closes only declared local buffer/image
+in distinct objects remain valid. Policy reads enforce the 1 MiB limit on the
+opened file, handle short reads, and reject observed size, identity or timestamp
+changes during reading. This is a read-time check, not a filesystem lock or a
+signature check. It closes only declared local buffer/image
 dependencies, rejects URLs, data URIs, traversal and symlinks, fingerprints
 every accepted source, checks GLB framing and indexed references, and reports
 portable topology and bounded PNG/JPEG header metrics. It never scans the whole
