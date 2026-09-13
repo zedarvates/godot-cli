@@ -157,6 +157,104 @@ test("asset JSON preserves valid Unicode and permits repeated keys in separate o
   }
 });
 
+test("policy growth after the path size check cannot bypass its read limit", async (t) => {
+  const project = await createProject(t);
+  const policyPath = path.join(project, 'policy.json');
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"}}');
+  await fs.writeFile(policyPath, '{"schema":"uo-godot-asset-policy/1"}');
+  const realpath = fs.realpath.bind(fs);
+  t.mock.method(fs, 'realpath', async (...args) => {
+    const result = await realpath(...args);
+    if (args[0] === policyPath) await fs.appendFile(policyPath, ' '.repeat(1024 * 1024));
+    return result;
+  });
+  const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+  assert.equal(r.valid, false);
+  assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_INVALID' && /limit|changed/.test(f.message)));
+});
+
+test("policy reads stop at initial size plus one when the opened file grows", async (t) => {
+  const project = await createProject(t);
+  const policyPath = path.join(project, 'policy.json');
+  const original = '{"schema":"uo-godot-asset-policy/1"}';
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"}}');
+  await fs.writeFile(policyPath, original);
+  const canonical = await fs.realpath(policyPath);
+  const open = fs.open.bind(fs);
+  let readBytes = 0;
+  let changed = false;
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === canonical) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...readArgs) => {
+        if (!changed) { changed = true; await fs.appendFile(policyPath, ' '.repeat(1024 * 1024)); }
+        const result = await read(...readArgs);
+        readBytes += result.bytesRead;
+        return result;
+      };
+    }
+    return handle;
+  });
+  const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+  assert.equal(changed, true);
+  assert.equal(r.valid, false);
+  assert.ok(readBytes <= Buffer.byteLength(original) + 1);
+  assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_INVALID'));
+});
+
+test("policy reader handles short reads without weakening constraints", async (t) => {
+  const project = await createProject(t);
+  const policyPath = path.join(project, 'policy.json');
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"}}');
+  await fs.writeFile(policyPath, '{"schema":"uo-godot-asset-policy/1","require_godot_import":true}');
+  const canonical = await fs.realpath(policyPath);
+  const open = fs.open.bind(fs);
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === canonical) {
+      const read = handle.read.bind(handle);
+      handle.read = (buffer, offset, length, position) => read(buffer, offset, Math.min(length, 3), position);
+    }
+    return handle;
+  });
+  const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+  assert.equal(r.valid, false);
+  assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_REQUIRES_IMPORT'));
+  assert.ok(!r.findings.some(f => f.code === 'ASSET_POLICY_INVALID'));
+});
+
+test("policy reader rejects a same-size rewrite observed during reading", async (t) => {
+  const project = await createProject(t);
+  const policyPath = path.join(project, 'policy.json');
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"}}');
+  await fs.writeFile(policyPath, '{"schema":"uo-godot-asset-policy/1","max_meshes":0}');
+  const canonical = await fs.realpath(policyPath);
+  const initial = await fs.stat(policyPath);
+  const open = fs.open.bind(fs);
+  let changed = false;
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === canonical) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...readArgs) => {
+        const result = await read(...readArgs);
+        if (!changed) {
+          changed = true;
+          await fs.writeFile(policyPath, '{"schema":"uo-godot-asset-policy/1","max_meshes":1}');
+          await fs.utimes(policyPath, initial.atime, new Date(initial.mtimeMs + 5000));
+        }
+        return result;
+      };
+    }
+    return handle;
+  });
+  const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+  assert.equal(changed, true);
+  assert.equal(r.valid, false);
+  assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_INVALID' && /changed/.test(f.message)));
+});
+
 test("asset root resolution rejects traversal and unsupported extensions before parsing", async (t) => {
   const project = await createProject(t);
 
