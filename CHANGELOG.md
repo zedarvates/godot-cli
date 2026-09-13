@@ -17,6 +17,9 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Fixed
 
+- Fail `max_image_dimension` asset policies when image dimensions are unknown,
+  instead of treating missing measurements as compliance with the limit.
+
 - Bound asset-policy reads to their initial size plus one byte, enforce the
   1 MiB ceiling on the opened file and reject observed read-time changes.
 

@@ -599,6 +599,53 @@ test("versioned asset policy enforces measured limits without default VR claims"
   );
 });
 
+test("image dimension policy cannot pass unknown measurements or fall through to Godot import", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(path.join(project, 'broken.png'), Buffer.from([0x89, 0x50]));
+  await fs.writeFile(path.join(project, 'texture.ktx2'), Buffer.from([1, 2, 3]));
+  await fs.writeFile(path.join(project, 'model.gltf'), JSON.stringify({
+    asset: { version: '2.0' }, images: [{ uri: 'broken.png' }, { uri: 'texture.ktx2' }],
+  }));
+  await fs.writeFile(path.join(project, 'policy.json'), JSON.stringify({
+    schema: 'uo-godot-asset-policy/1', max_image_dimension: 1024,
+  }));
+  const options = { project, asset: 'res://model.gltf', env: {} };
+  const advisory = await validateAsset(options);
+  assert.equal(advisory.valid, true);
+  assert.ok(advisory.images.every(image => image.width === null && image.height === null));
+  for (const godotImport of [false, true]) {
+    const r = await validateAsset({ ...options, policy: 'res://policy.json', godotImport, godot: 'missing-godot' });
+    assert.equal(r.valid, false);
+    assert.equal(r.policy.passed, false);
+    assert.deepEqual(r.findings.filter(f => f.code === 'ASSET_POLICY_MEASUREMENT_UNKNOWN').map(f => f.location), ['/images/0', '/images/1']);
+    assert.equal(r.proof.godotImport.complete, false);
+    assert.equal(r.proof.godotImport.status, godotImport ? 'error' : 'not_requested');
+    if (godotImport) assert.ok(r.findings.some(f => f.code === 'ASSET_IMPORT_FAILED' && /static validation failed/.test(f.message)));
+  }
+  const cli = await runCli(['asset', 'validate', 'res://model.gltf', '--project', project, '--policy', 'res://policy.json']);
+  assert.equal(cli.code, 1, cli.stdout + cli.stderr);
+  assert.equal(JSON.parse(cli.stdout).policy.passed, false);
+});
+
+test("image dimension policy accepts measured boundaries and image-free assets", async (t) => {
+  const project = await createProject(t);
+  // Header-only fixture: dimensions evidence, deliberately not a decoded image.
+  const png = Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,
+    0,0,0,13,0x49,0x48,0x44,0x52,0,0,0,2,0,0,0,3]);
+  await fs.writeFile(path.join(project, 'image.png'), png);
+  for (const images of [[], [{ uri: 'image.png' }]]) {
+    await fs.writeFile(path.join(project, 'model.gltf'), JSON.stringify({ asset: { version: '2.0' }, images }));
+    for (const limit of [2, 3]) {
+      await fs.writeFile(path.join(project, 'policy.json'), JSON.stringify({ schema: 'uo-godot-asset-policy/1', max_image_dimension: limit }));
+      const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+      assert.equal(r.valid, images.length === 0 || limit === 3);
+      assert.equal(r.policy.passed, r.valid);
+      if (!r.valid) assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_LIMIT'));
+      assert.ok(!r.findings.some(f => f.code === 'ASSET_POLICY_MEASUREMENT_UNKNOWN'));
+    }
+  }
+});
+
 test("GLB validation rejects ambiguous framing with a stable error code", async (t) => {
   const project = await createProject(t);
   const wrongMagic = buildGlb({ asset: { version: "2.0" } });
