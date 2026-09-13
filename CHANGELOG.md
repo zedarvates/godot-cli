@@ -17,6 +17,9 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Fixed
 
+- Reject duplicate decoded JSON keys and malformed UTF-8 in glTF, GLB JSON
+  chunks and asset policies instead of silently accepting replacement values.
+
 - Bound registry diagnostics during collection, cap individual message/location
   text, and report `findingCount`, `findingsTruncated` and an explicit error
   marker when details are omitted or shortened.

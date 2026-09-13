@@ -3,6 +3,7 @@ import { createReadStream, promises as fs } from "node:fs";
 import * as path from "node:path";
 
 import { discoverProject } from "./project.js";
+import { assertUniqueJsonKeys } from "./json-keys.js";
 import {
   runIsolatedGodotImport,
   type AssetImportReport,
@@ -316,11 +317,18 @@ function validateJsonShape(value: unknown): void {
   }
 }
 
-function parseGltf(bytes: Buffer): Record<string, unknown> {
+function parseAssetJson(bytes: Buffer): unknown {
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
     throw new Error("Asset JSON must not contain a UTF-8 BOM");
   }
-  const parsed: unknown = JSON.parse(bytes.toString("utf8"));
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  const parsed: unknown = JSON.parse(text);
+  assertUniqueJsonKeys(text);
+  return parsed;
+}
+
+function parseGltf(bytes: Buffer): Record<string, unknown> {
+  const parsed = parseAssetJson(bytes);
   if (!isRecord(parsed)) throw new Error("Asset JSON root must be an object");
   validateJsonShape(parsed);
   const asset = parsed.asset;
@@ -1090,7 +1098,7 @@ async function loadPolicy(
   ) {
     throw new Error("Asset policy resolves outside the Godot project");
   }
-  const parsed: unknown = JSON.parse(await fs.readFile(canonical, "utf8"));
+  const parsed = parseAssetJson(await fs.readFile(canonical));
   if (!isRecord(parsed) || parsed.schema !== "uo-godot-asset-policy/1") {
     throw new Error("Asset policy schema must be uo-godot-asset-policy/1");
   }
