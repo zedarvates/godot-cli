@@ -55,6 +55,55 @@ test('transitive, shared and cyclic dependencies are checked exactly once', asyn
   assert.equal(JSON.parse(cli.stdout).templateChecks.length, 4);
 });
 
+test('caller can lower the unique-template closure budget without counting shared or cyclic references twice', async t => {
+  const f = await fixture(t);
+  await add(f, 'alpha', ['items:shared@1.0.0']);
+  await add(f, 'beta', ['items:shared@1.0.0']);
+  await add(f, 'shared', ['items:alpha@1.0.0']);
+  f.doc.dependencies = ['items:alpha@1.0.0', 'items:beta@1.0.0'];
+  await f.save();
+  for (const maxTemplates of [1, 3, 4, 128]) {
+    const r = await validateTemplate({ root: f.root, template: TEMPLATE, withDependencies: true, maxTemplates });
+    assert.equal(r.complete, maxTemplates >= 4, JSON.stringify(r));
+    assert.equal(r.valid, maxTemplates >= 4);
+    assert.equal(r.consumerReady, false);
+    if (maxTemplates < 4) {
+      assert.equal(r.findings[0].code, 'TEMPLATE_CLOSURE_LIMIT');
+      assert.equal(r.dependencyClosureChecked, false);
+      assert.deepEqual(r.templateChecks, []);
+    } else assert.equal(r.templateChecks.length, 4);
+  }
+  for (const maxTemplates of [3, 4]) {
+    const cli = spawnSync(process.execPath, ['dist/cli.js', 'template', 'validate', TEMPLATE,
+      '--registry', f.root, '--with-dependencies', '--max-templates', String(maxTemplates)],
+      { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    assert.equal(cli.status, maxTemplates === 4 ? 0 : 1, cli.stdout + cli.stderr);
+    assert.equal(JSON.parse(cli.stdout).complete, maxTemplates === 4);
+  }
+});
+
+test('closure budget accepts a root-only closure and rejects invalid or inactive limits before reads', async t => {
+  const f = await fixture(t);
+  const rootOnly = await validateTemplate({ root: f.root, template: TEMPLATE, withDependencies: true, maxTemplates: 1 });
+  assert.equal(rootOnly.valid, true);
+  assert.equal(rootOnly.templateChecks.length, 1);
+  for (const maxTemplates of [0, -1, 129, 1.5, NaN, Infinity, '2', null]) {
+    const r = await validateTemplate({ root: 'missing-registry', template: TEMPLATE, withDependencies: true, maxTemplates });
+    assert.equal(r.findings[0].code, 'TEMPLATE_LIMIT_INVALID');
+    assert.equal(r.registryReadBudget, null);
+  }
+  for (const withDependencies of [undefined, false]) {
+    const r = await validateTemplate({ root: 'missing-registry', template: TEMPLATE, withDependencies, maxTemplates: 1 });
+    assert.equal(r.findings[0].code, 'TEMPLATE_OPTION_INVALID');
+  }
+  for (const args of [['--max-templates', '2'], ['--with-dependencies', '--max-templates', '129']]) {
+    const cli = spawnSync(process.execPath, ['dist/cli.js', 'template', 'validate', TEMPLATE, '--registry', 'missing-registry', ...args],
+      { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    assert.equal(cli.status, 1);
+    assert.match(JSON.parse(cli.stdout).findings[0].code, /^TEMPLATE_(OPTION|LIMIT)_INVALID$/);
+  }
+});
+
 test('dependency traversal fails closed at 128 templates including the root', async t => {
   for (const count of [127, 128]) {
     const f = await fixture(t);

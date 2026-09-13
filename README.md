@@ -250,6 +250,15 @@ shared references and cycles are visited once in dependency-array order. No
 aliases or version ranges are substituted. Every loaded template gets the same
 file/spec checksum, numeric-token and final fingerprint checks as the root.
 
+Use `--with-dependencies --max-templates <count>` to lower that closure limit
+to an integer from 1 to 128 (default: 128). The selected root counts as one;
+shared and cyclic references count only once. Exceeding the limit returns
+`TEMPLATE_CLOSURE_LIMIT`, `complete: false`, `consumerReady: false`, and exit
+status 1, without returning partial template checks. The option is rejected
+without `--with-dependencies`. This limits the schema-validation closure, not
+the preceding whole-registry inspection; use `--registry-max-read-bytes` to
+bound that phase's referenced-file reads.
+
 `templateChecks` lists per-file schema results and `dependencyClosureChecked`
 is true only after the requested closure and integrity checks finish (even if
 some schemas rejected their documents). Missing references, read/checksum errors
