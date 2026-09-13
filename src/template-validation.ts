@@ -2,7 +2,7 @@ import { Worker } from "node:worker_threads";
 import { MAX_REGISTRY_TOTAL_BYTES, type TemplateRegistryInspectionReport } from "./template-registry-inspection.js";
 
 export const MAX_VALIDATION_TEMPLATES = 128;
-export interface TemplateValidationOptions { root: string; template: string; timeoutMs?: number; expectedCatalogSha256?: string; registryMaxReadBytes?: number; withDependencies?: boolean }
+export interface TemplateValidationOptions { root: string; template: string; timeoutMs?: number; expectedCatalogSha256?: string; registryMaxReadBytes?: number; withDependencies?: boolean; maxTemplates?: number }
 export interface TemplateValidationReport {
   status: "ok" | "error";
   valid: boolean;
@@ -31,6 +31,17 @@ export function validationFailure(template: string, code: string, message: strin
 export function validateTemplate(options: TemplateValidationOptions): Promise<TemplateValidationReport> {
   if (options.withDependencies !== undefined && typeof options.withDependencies !== "boolean") {
     return Promise.resolve(validationFailure(options.template, "TEMPLATE_OPTION_INVALID", "withDependencies must be a boolean"));
+  }
+  const maxTemplates = options.maxTemplates;
+  if (maxTemplates !== undefined) {
+    if (!Number.isInteger(maxTemplates) || maxTemplates < 1 || maxTemplates > MAX_VALIDATION_TEMPLATES) {
+      return Promise.resolve(validationFailure(options.template, "TEMPLATE_LIMIT_INVALID",
+        `maxTemplates must be an integer between 1 and ${MAX_VALIDATION_TEMPLATES}`));
+    }
+    if (options.withDependencies !== true) {
+      return Promise.resolve(validationFailure(options.template, "TEMPLATE_OPTION_INVALID",
+        "maxTemplates requires withDependencies"));
+    }
   }
   const budget = options.registryMaxReadBytes;
   if (budget !== undefined && (!Number.isInteger(budget) || budget < 1 || budget > MAX_REGISTRY_TOTAL_BYTES)) {

@@ -200,6 +200,7 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
   const template = await loadTemplate(entry);
   const documents = [{ entry, file: template }];
   if (options.withDependencies) {
+    const maxTemplates = options.maxTemplates ?? MAX_VALIDATION_TEMPLATES;
     const byIdentity = new Map(entries.filter(e => e.validation_profile === "strict-v1")
       .map(e => [`${e.id}@${e.version}`, e]));
     const seen = new Set<string>([entry.file]);
@@ -209,8 +210,10 @@ async function execute(options: TemplateValidationOptions): Promise<TemplateVali
         const dependency = byIdentity.get(reference);
         if (!dependency) throw new Error("Dependency must resolve to an exact strict template version");
         if (seen.has(dependency.file)) continue;
-        if (documents.length === MAX_VALIDATION_TEMPLATES) {
-          throw new Error(`Dependency validation exceeds ${MAX_VALIDATION_TEMPLATES} templates including the root`);
+        if (documents.length >= maxTemplates) {
+          return { ...validationFailure(options.template, "TEMPLATE_CLOSURE_LIMIT",
+            `Dependency validation exceeds ${maxTemplates} templates including the root`),
+            registryReadBudget: inspection.readBudget };
         }
         seen.add(dependency.file);
         documents.push({ entry: dependency, file: await loadTemplate(dependency) });

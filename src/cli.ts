@@ -657,11 +657,13 @@ templateCommands
   .option("--registry-max-read-bytes <bytes>", "Lower the referenced-file budget of registry inspection (maximum 536870912)")
   .option("--with-dependencies", "Validate the exact-version dependency closure (maximum 128 templates)")
   .option("--timeout-ms <ms>", "Lower the validation worker time limit (integer 1-120000; default 120000)")
-  .action(async (template: string, options: { registry: string; expectedCatalogSha256?: string; registryMaxReadBytes?: string; withDependencies?: boolean; timeoutMs?: string }) => {
+  .option("--max-templates <count>", "Lower the dependency closure limit including the root (1-128; requires --with-dependencies)")
+  .action(async (template: string, options: { registry: string; expectedCatalogSha256?: string; registryMaxReadBytes?: string; withDependencies?: boolean; timeoutMs?: string; maxTemplates?: string }) => {
     try {
       const report = await validateTemplate({ root: options.registry, template,
         withDependencies: options.withDependencies,
         timeoutMs: options.timeoutMs === undefined ? undefined : Number(options.timeoutMs),
+        maxTemplates: options.maxTemplates === undefined ? undefined : Number(options.maxTemplates),
         expectedCatalogSha256: options.expectedCatalogSha256,
         registryMaxReadBytes: options.registryMaxReadBytes === undefined ? undefined : Number(options.registryMaxReadBytes) });
       printLocalResult(report);

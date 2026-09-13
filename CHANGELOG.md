@@ -7,6 +7,10 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Added
 
+- Allow a lower dependency closure budget with `template validate
+  --with-dependencies --max-templates` (1-128, including the root). Exhaustion
+  now reports `TEMPLATE_CLOSURE_LIMIT` and remains incomplete.
+
 - Expose the existing strict-validation worker deadline as
   `template validate --timeout-ms` (1-120000 ms), including dependency closure
   validation. The default remains 120000 ms; expiration fails closed.
