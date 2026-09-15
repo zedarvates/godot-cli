@@ -938,8 +938,13 @@ async function readPrefix(file: string, maximum = 64 * 1024): Promise<Buffer> {
   try {
     const stat = await handle.stat();
     const bytes = Buffer.alloc(Math.min(stat.size, maximum));
-    const result = await handle.read(bytes, 0, bytes.length, 0);
-    return bytes.subarray(0, result.bytesRead);
+    let size = 0;
+    while (size < bytes.length) {
+      const result = await handle.read(bytes, size, bytes.length - size, size);
+      if (result.bytesRead === 0) break;
+      size += result.bytesRead;
+    }
+    return bytes.subarray(0, size);
   } finally {
     await handle.close();
   }

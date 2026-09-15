@@ -452,6 +452,8 @@ image headers) fail the policy with `ASSET_POLICY_MEASUREMENT_UNKNOWN` and exit
 code 1; requesting Godot import cannot override this static rejection. Without
 that rule, unknown dimensions retain their advisory behavior. These measurements
 come from bounded headers, not pixel decoding or image-quality certification.
+Header reads assemble partial reads up to the 64 KiB prefix limit and stop at
+EOF; an incomplete header still leaves dimensions unknown.
 `--godot-import` copies the already validated closure to a disposable project,
 runs Godot headlessly with XR disabled and a reduced environment, then reports
 loaded node/mesh/material/animation/skeleton/body/collision counts. Collision

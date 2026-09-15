@@ -17,6 +17,9 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Fixed
 
+- Assemble short image-header reads up to the existing 64 KiB limit instead
+  of incorrectly treating readable PNG/JPEG dimensions as unknown.
+
 - Fail `max_image_dimension` asset policies when image dimensions are unknown,
   instead of treating missing measurements as compliance with the limit.
 
