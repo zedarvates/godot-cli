@@ -1,0 +1,930 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  MAX_ASSET_FILE_BYTES,
+  validateAsset,
+} from "../dist/asset-validation.js";
+
+async function createProject(context) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "uo-asset-unit-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(root, "project.godot"),
+    'config_version=5\n\n[application]\nconfig/name="Asset Unit"\n',
+    "utf8"
+  );
+  return root;
+}
+
+function buildGlb(document) {
+  const json = Buffer.isBuffer(document) ? document : Buffer.from(JSON.stringify(document), "utf8");
+  const paddedLength = Math.ceil(json.length / 4) * 4;
+  const chunk = Buffer.alloc(paddedLength, 0x20);
+  json.copy(chunk);
+  const glb = Buffer.alloc(12 + 8 + chunk.length);
+  glb.writeUInt32LE(0x46546c67, 0);
+  glb.writeUInt32LE(2, 4);
+  glb.writeUInt32LE(glb.length, 8);
+  glb.writeUInt32LE(chunk.length, 12);
+  glb.writeUInt32LE(0x4e4f534a, 16);
+  chunk.copy(glb, 20);
+  return glb;
+}
+
+function runCli(args, env = process.env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["dist/cli.js", ...args], {
+      cwd: new URL("..", import.meta.url),
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
+    child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
+    child.once("error", reject);
+    child.once("exit", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+test("static validation accepts a minimal project-local glTF 2.0 asset", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "model.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      scenes: [{ nodes: [0] }],
+      nodes: [{}],
+      scene: 0,
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://model.gltf",
+    env: {},
+  });
+
+  assert.equal(report.status, "ok");
+  assert.equal(report.valid, true);
+  assert.equal(report.complete, true);
+  assert.equal(report.format, "gltf");
+  assert.equal(report.proof.static.status, "ok");
+  assert.equal(report.proof.godotImport.status, "not_requested");
+  assert.deepEqual(report.metrics, {
+    scenes: 1,
+    nodes: 1,
+    meshes: 0,
+    primitives: 0,
+    materials: 0,
+    textures: 0,
+    images: 0,
+    samplers: 0,
+    skins: 0,
+    animations: 0,
+    accessors: 0,
+    declaredBufferBytes: 0,
+    primitiveModes: {},
+    triangles: { value: 0, reason: null },
+  });
+  assert.equal(report.closure.fileCount, 1);
+  assert.equal(report.images.length, 0);
+  assert.equal(report.evidence.lod.status, "unknown");
+  assert.equal(report.evidence.collision.status, "unknown");
+  assert.equal(report.integrity.unchanged, true);
+});
+
+test("asset JSON rejects duplicate decoded keys in glTF and GLB", async (t) => {
+  const project = await createProject(t);
+  for (const text of [
+    '{"asset":{"version":"1.0","version":"2.0"}}',
+    '{"asset":{"version":"2.0"},"extras":{"name":"a","na\\u006de":"b"}}',
+    '{"asset":{"version":"2.0"},"extras":[{"x":1,"x":2}]}',
+  ]) {
+    for (const extension of ['gltf', 'glb']) {
+      const raw = Buffer.from(text);
+      const bytes = extension === 'glb' ? buildGlb(raw) : raw;
+      await fs.writeFile(path.join(project, `model.${extension}`), bytes);
+      const r = await validateAsset({ project, asset: `res://model.${extension}`, env: {} });
+      assert.equal(r.valid, false);
+      assert.ok(r.findings.some(f => /Duplicate JSON key/.test(f.message)));
+      assert.equal(r.proof.godotImport.status, 'not_requested');
+      assert.deepEqual(await fs.readFile(path.join(project, `model.${extension}`)), bytes);
+    }
+  }
+});
+
+test("asset JSON rejects malformed UTF-8 in glTF and GLB strings", async (t) => {
+  const project = await createProject(t);
+  const raw = Buffer.concat([Buffer.from('{"asset":{"version":"2.0"},"extras":{"name":"'), Buffer.from([0xc3, 0x28]), Buffer.from('"}}')]);
+  for (const extension of ['gltf', 'glb']) {
+    await fs.writeFile(path.join(project, `model.${extension}`), extension === 'glb' ? buildGlb(raw) : raw);
+    const r = await validateAsset({ project, asset: `res://model.${extension}`, env: {} });
+    assert.equal(r.valid, false);
+    assert.ok(r.findings.some(f => /UTF-8|encoded data/.test(f.message)));
+  }
+});
+
+test("asset policy rejects duplicate keys and malformed UTF-8 instead of weakening constraints", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"}}');
+  for (const raw of [
+    Buffer.from('{"schema":"uo-godot-asset-policy/1","require_godot_import":true,"require_godot_import":false}'),
+    Buffer.from('{"schema":"uo-godot-asset-policy/1","max_meshes":0,"max_me\\u0073hes":10}'),
+    Buffer.concat([Buffer.from('{"schema":"uo-godot-asset-policy/1","'), Buffer.from([0xc3, 0x28]), Buffer.from('":false}')]),
+  ]) {
+    await fs.writeFile(path.join(project, 'policy.json'), raw);
+    const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+    assert.equal(r.valid, false);
+    assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_INVALID' && /Duplicate JSON key|UTF-8|encoded data/.test(f.message)));
+  }
+});
+
+test("asset JSON preserves valid Unicode and permits repeated keys in separate objects", async (t) => {
+  const project = await createProject(t);
+  const document = { asset: { version: '2.0' }, extras: [{ name: 'Épée 🗡️' }, { name: '{"name": "data"}' }] };
+  for (const extension of ['gltf', 'glb']) {
+    await fs.writeFile(path.join(project, `model.${extension}`), extension === 'glb' ? buildGlb(document) : JSON.stringify(document));
+    const r = await validateAsset({ project, asset: `res://model.${extension}`, env: {} });
+    assert.equal(r.valid, true, JSON.stringify(r.findings));
+  }
+});
+
+test("policy growth after the path size check cannot bypass its read limit", async (t) => {
+  const project = await createProject(t);
+  const policyPath = path.join(project, 'policy.json');
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"}}');
+  await fs.writeFile(policyPath, '{"schema":"uo-godot-asset-policy/1"}');
+  const realpath = fs.realpath.bind(fs);
+  t.mock.method(fs, 'realpath', async (...args) => {
+    const result = await realpath(...args);
+    if (args[0] === policyPath) await fs.appendFile(policyPath, ' '.repeat(1024 * 1024));
+    return result;
+  });
+  const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+  assert.equal(r.valid, false);
+  assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_INVALID' && /limit|changed/.test(f.message)));
+});
+
+test("policy reads stop at initial size plus one when the opened file grows", async (t) => {
+  const project = await createProject(t);
+  const policyPath = path.join(project, 'policy.json');
+  const original = '{"schema":"uo-godot-asset-policy/1"}';
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"}}');
+  await fs.writeFile(policyPath, original);
+  const canonical = await fs.realpath(policyPath);
+  const open = fs.open.bind(fs);
+  let readBytes = 0;
+  let changed = false;
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === canonical) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...readArgs) => {
+        if (!changed) { changed = true; await fs.appendFile(policyPath, ' '.repeat(1024 * 1024)); }
+        const result = await read(...readArgs);
+        readBytes += result.bytesRead;
+        return result;
+      };
+    }
+    return handle;
+  });
+  const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+  assert.equal(changed, true);
+  assert.equal(r.valid, false);
+  assert.ok(readBytes <= Buffer.byteLength(original) + 1);
+  assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_INVALID'));
+});
+
+test("policy reader handles short reads without weakening constraints", async (t) => {
+  const project = await createProject(t);
+  const policyPath = path.join(project, 'policy.json');
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"}}');
+  await fs.writeFile(policyPath, '{"schema":"uo-godot-asset-policy/1","require_godot_import":true}');
+  const canonical = await fs.realpath(policyPath);
+  const open = fs.open.bind(fs);
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === canonical) {
+      const read = handle.read.bind(handle);
+      handle.read = (buffer, offset, length, position) => read(buffer, offset, Math.min(length, 3), position);
+    }
+    return handle;
+  });
+  const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+  assert.equal(r.valid, false);
+  assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_REQUIRES_IMPORT'));
+  assert.ok(!r.findings.some(f => f.code === 'ASSET_POLICY_INVALID'));
+});
+
+test("policy reader rejects a same-size rewrite observed during reading", async (t) => {
+  const project = await createProject(t);
+  const policyPath = path.join(project, 'policy.json');
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"}}');
+  await fs.writeFile(policyPath, '{"schema":"uo-godot-asset-policy/1","max_meshes":0}');
+  const canonical = await fs.realpath(policyPath);
+  const initial = await fs.stat(policyPath);
+  const open = fs.open.bind(fs);
+  let changed = false;
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === canonical) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...readArgs) => {
+        const result = await read(...readArgs);
+        if (!changed) {
+          changed = true;
+          await fs.writeFile(policyPath, '{"schema":"uo-godot-asset-policy/1","max_meshes":1}');
+          await fs.utimes(policyPath, initial.atime, new Date(initial.mtimeMs + 5000));
+        }
+        return result;
+      };
+    }
+    return handle;
+  });
+  const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+  assert.equal(changed, true);
+  assert.equal(r.valid, false);
+  assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_INVALID' && /changed/.test(f.message)));
+});
+
+test("asset root resolution rejects traversal and unsupported extensions before parsing", async (t) => {
+  const project = await createProject(t);
+
+  await assert.rejects(
+    () =>
+      validateAsset({
+        project,
+        asset: "res://../outside.gltf",
+        env: {},
+      }),
+    /traversal|must stay inside/
+  );
+  await assert.rejects(
+    () =>
+      validateAsset({
+        project,
+        asset: "res://model.obj",
+        env: {},
+      }),
+    /only \.gltf or \.glb/
+  );
+});
+
+test("asset root resolution rejects oversized files before reading them", async (t) => {
+  const project = await createProject(t);
+  const asset = path.join(project, "huge.gltf");
+  await fs.writeFile(asset, "{}", "utf8");
+  await fs.truncate(asset, MAX_ASSET_FILE_BYTES + 1);
+
+  await assert.rejects(
+    () => validateAsset({ project, asset: "res://huge.gltf", env: {} }),
+    /exceeds the .* validation limit/
+  );
+});
+
+test("static validation reports malformed and unsupported glTF JSON", async (t) => {
+  const project = await createProject(t);
+  const cases = [
+    ["malformed.gltf", "{", /JSON/],
+    ["legacy.gltf", JSON.stringify({ asset: { version: "1.0" } }), /version "2\.0"/],
+    ["bom.gltf", `\ufeff${JSON.stringify({ asset: { version: "2.0" } })}`, /UTF-8 BOM/],
+    [
+      "dangerous.gltf",
+      '{"asset":{"version":"2.0"},"__proto__":{"polluted":true}}',
+      /forbidden key/,
+    ],
+  ];
+
+  for (const [name, contents, expected] of cases) {
+    await fs.writeFile(path.join(project, name), contents, "utf8");
+    const report = await validateAsset({
+      project,
+      asset: `res://${name}`,
+      env: {},
+    });
+    assert.equal(report.status, "error", name);
+    assert.equal(report.valid, false, name);
+    assert.equal(report.complete, true, name);
+    assert.equal(report.proof.static.status, "error", name);
+    assert.equal(report.findings[0].code, "ASSET_GLTF_INVALID", name);
+    assert.match(report.findings[0].message, expected, name);
+    assert.equal(report.integrity.unchanged, true, name);
+  }
+});
+
+test("static validation bounds JSON nesting", async (t) => {
+  const project = await createProject(t);
+  let nested = "0";
+  for (let depth = 0; depth < 70; depth += 1) nested = `[${nested}]`;
+  await fs.writeFile(
+    path.join(project, "deep.gltf"),
+    `{"asset":{"version":"2.0"},"extras":${nested}}`,
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://deep.gltf",
+    env: {},
+  });
+  assert.equal(report.status, "error");
+  assert.match(report.findings[0].message, /depth limit/);
+  assert.equal(report.integrity.unchanged, true);
+});
+
+test("static validation fingerprints the bounded local dependency closure", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(path.join(project, "mesh.bin"), Buffer.alloc(12, 7));
+  await fs.writeFile(
+    path.join(project, "texture.png"),
+    Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03,
+      0x08, 0x06, 0x00, 0x00, 0x00,
+    ])
+  );
+  await fs.writeFile(
+    path.join(project, "model.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      buffers: [{ uri: "mesh.bin", byteLength: 12 }],
+      images: [{ uri: "texture.png", mimeType: "image/png" }],
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://model.gltf",
+    env: {},
+  });
+
+  assert.equal(report.status, "ok");
+  assert.deepEqual(
+    report.closure.files.map((file) => [file.resourcePath, file.kind]),
+    [
+      ["res://model.gltf", "root"],
+      ["res://mesh.bin", "buffer"],
+      ["res://texture.png", "image"],
+    ]
+  );
+  assert.equal(report.closure.fileCount, 3);
+  assert.equal(report.metrics.declaredBufferBytes, 12);
+});
+
+test("static validation rejects non-local and escaping dependency URIs", async (t) => {
+  const project = await createProject(t);
+  const uris = [
+    "https://host/a.bin",
+    "//host/a.bin",
+    "file:///a.bin",
+    "data:application/octet-stream;base64,AA==",
+    "/absolute.bin",
+    "C:\\absolute.bin",
+    "../outside.bin",
+    "%2e%2e/outside.bin",
+  ];
+
+  for (const [index, uri] of uris.entries()) {
+    const name = `forbidden-${index}.gltf`;
+    await fs.writeFile(
+      path.join(project, name),
+      JSON.stringify({
+        asset: { version: "2.0" },
+        buffers: [{ uri, byteLength: 1 }],
+      }),
+      "utf8"
+    );
+    const report = await validateAsset({
+      project,
+      asset: `res://${name}`,
+      env: {},
+    });
+    assert.equal(report.status, "error", uri);
+    assert.ok(
+      report.findings.some((finding) => finding.code === "ASSET_URI_FORBIDDEN"),
+      uri
+    );
+    assert.equal(report.closure.fileCount, 1, uri);
+  }
+});
+
+test("static validation rejects out-of-range glTF indices at stable locations", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "indices.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      scene: 1,
+      scenes: [{ nodes: [1] }],
+      nodes: [{ mesh: 1 }],
+      meshes: [{ primitives: [{ indices: 1, material: 1 }] }],
+      accessors: [{}],
+      materials: [{}],
+      textures: [{ source: 1, sampler: 1 }],
+      images: [{}],
+      samplers: [{}],
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://indices.gltf",
+    env: {},
+  });
+
+  assert.equal(report.status, "error");
+  assert.deepEqual(
+    report.findings
+      .filter((finding) => finding.code === "ASSET_REFERENCE_OUT_OF_RANGE")
+      .map((finding) => finding.location),
+    [
+      "/meshes/0/primitives/0/indices",
+      "/meshes/0/primitives/0/material",
+      "/nodes/0/mesh",
+      "/scene",
+      "/scenes/0/nodes/0",
+      "/textures/0/sampler",
+      "/textures/0/source",
+    ]
+  );
+});
+
+test("static validation reads bounded PNG and JPEG dimensions without decoding pixels", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "two-by-three.png"),
+    Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03,
+      0x08, 0x06, 0x00, 0x00, 0x00,
+    ])
+  );
+  await fs.writeFile(
+    path.join(project, "four-by-five.jpg"),
+    Buffer.from([
+      0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x05,
+      0x00, 0x04, 0x01, 0x01, 0x11, 0x00, 0xff, 0xd9,
+    ])
+  );
+  await fs.writeFile(
+    path.join(project, "images.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      images: [
+        { uri: "two-by-three.png", mimeType: "image/png" },
+        { uri: "four-by-five.jpg", mimeType: "image/jpeg" },
+      ],
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://images.gltf",
+    env: {},
+  });
+
+  assert.equal(report.status, "ok");
+  assert.deepEqual(report.images, [
+    {
+      resourcePath: "res://two-by-three.png",
+      mimeType: "image/png",
+      width: 2,
+      height: 3,
+    },
+    {
+      resourcePath: "res://four-by-five.jpg",
+      mimeType: "image/jpeg",
+      width: 4,
+      height: 5,
+    },
+  ]);
+});
+
+test("image header reads assemble short PNG and JPEG reads while retaining the 64 KiB cap", async (t) => {
+  const project = await createProject(t);
+  const png = Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,
+    0,0,0,13,0x49,0x48,0x44,0x52,0,0,0,2,0,0,0,3]);
+  const jpeg = Buffer.from([0xff,0xd8,0xff,0xc0,0,0x0b,8,0,5,0,4,1,1,0x11,0,0xff,0xd9]);
+  const vectors = [
+    ['small.png', png, 3, 2, 3, 24],
+    ['small.jpg', jpeg, 3, 4, 5, 17],
+    ['large.png', Buffer.concat([png, Buffer.alloc(128 * 1024)]), 8192, 2, 3, 65536],
+  ];
+  const targets = new Map();
+  for (const [name, bytes, chunk] of vectors) {
+    const file = path.join(project, name);
+    await fs.writeFile(file, bytes);
+    targets.set(await fs.realpath(file), { chunk, bytesRead: 0 });
+  }
+  const open = fs.open.bind(fs);
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args);
+    const target = targets.get(args[0]);
+    if (target) {
+      const read = handle.read.bind(handle);
+      handle.read = async (buffer, offset, length, position) => {
+        const result = await read(buffer, offset, Math.min(length, target.chunk), position);
+        target.bytesRead += result.bytesRead;
+        return result;
+      };
+    }
+    return handle;
+  });
+  await fs.writeFile(path.join(project, 'model.gltf'), JSON.stringify({
+    asset: { version: '2.0' }, images: vectors.map(([uri]) => ({ uri })),
+  }));
+  await fs.writeFile(path.join(project, 'policy.json'), '{"schema":"uo-godot-asset-policy/1","max_image_dimension":5}');
+  const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+  assert.equal(r.valid, true, JSON.stringify(r.findings));
+  assert.equal(r.policy.passed, true);
+  for (const [i, [name, , , width, height, readBytes]] of vectors.entries()) {
+    assert.equal(r.images[i].width, width);
+    assert.equal(r.images[i].height, height);
+    assert.equal(targets.get(await fs.realpath(path.join(project, name))).bytesRead, readBytes);
+  }
+});
+
+test("image header reader stops at EOF without inventing missing dimensions", async (t) => {
+  const project = await createProject(t);
+  const file = path.join(project, 'partial.png');
+  await fs.writeFile(file, Buffer.alloc(24));
+  const canonical = await fs.realpath(file);
+  const open = fs.open.bind(fs);
+  let reads = 0;
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === canonical) {
+      const read = handle.read.bind(handle);
+      handle.read = async (buffer, offset, length, position) => {
+        reads++;
+        if (reads > 1) return { bytesRead: 0, buffer };
+        return read(buffer, offset, Math.min(length, 3), position);
+      };
+    }
+    return handle;
+  });
+  await fs.writeFile(path.join(project, 'model.gltf'), '{"asset":{"version":"2.0"},"images":[{"uri":"partial.png"}]}');
+  const r = await validateAsset({ project, asset: 'res://model.gltf', env: {} });
+  assert.equal(r.images[0].width, null);
+  assert.equal(r.images[0].height, null);
+  assert.ok(reads <= 2);
+});
+
+test("static validation derives triangle-list metrics from accessor counts", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "triangles.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      accessors: [{ count: 4 }, { count: 6 }],
+      meshes: [
+        {
+          primitives: [
+            { mode: 4, attributes: { POSITION: 0 }, indices: 1 },
+          ],
+        },
+      ],
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://triangles.gltf",
+    env: {},
+  });
+
+  assert.equal(report.status, "ok");
+  assert.deepEqual(report.metrics.primitiveModes, { "4": 1 });
+  assert.deepEqual(report.metrics.triangles, { value: 2, reason: null });
+});
+
+test("static validation accepts a strictly framed GLB 2.0 JSON chunk", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "model.glb"),
+    buildGlb({ asset: { version: "2.0" }, scenes: [{}] })
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://model.glb",
+    env: {},
+  });
+
+  assert.equal(report.status, "ok");
+  assert.equal(report.format, "glb");
+  assert.equal(report.metrics.scenes, 1);
+  assert.equal(report.closure.fileCount, 1);
+  assert.equal(report.integrity.unchanged, true);
+});
+
+test("versioned asset policy enforces measured limits without default VR claims", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "model.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      meshes: [{ primitives: [] }],
+    }),
+    "utf8"
+  );
+  await fs.writeFile(
+    path.join(project, "asset-policy.json"),
+    JSON.stringify({
+      schema: "uo-godot-asset-policy/1",
+      max_meshes: 0,
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://model.gltf",
+    policy: "res://asset-policy.json",
+    env: {},
+  });
+
+  assert.equal(report.status, "error");
+  assert.deepEqual(report.policy, {
+    resourcePath: "res://asset-policy.json",
+    schema: "uo-godot-asset-policy/1",
+    passed: false,
+  });
+  assert.ok(
+    report.findings.some((finding) => finding.code === "ASSET_POLICY_LIMIT")
+  );
+});
+
+test("image dimension policy cannot pass unknown measurements or fall through to Godot import", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(path.join(project, 'broken.png'), Buffer.from([0x89, 0x50]));
+  await fs.writeFile(path.join(project, 'texture.ktx2'), Buffer.from([1, 2, 3]));
+  await fs.writeFile(path.join(project, 'model.gltf'), JSON.stringify({
+    asset: { version: '2.0' }, images: [{ uri: 'broken.png' }, { uri: 'texture.ktx2' }],
+  }));
+  await fs.writeFile(path.join(project, 'policy.json'), JSON.stringify({
+    schema: 'uo-godot-asset-policy/1', max_image_dimension: 1024,
+  }));
+  const options = { project, asset: 'res://model.gltf', env: {} };
+  const advisory = await validateAsset(options);
+  assert.equal(advisory.valid, true);
+  assert.ok(advisory.images.every(image => image.width === null && image.height === null));
+  for (const godotImport of [false, true]) {
+    const r = await validateAsset({ ...options, policy: 'res://policy.json', godotImport, godot: 'missing-godot' });
+    assert.equal(r.valid, false);
+    assert.equal(r.policy.passed, false);
+    assert.deepEqual(r.findings.filter(f => f.code === 'ASSET_POLICY_MEASUREMENT_UNKNOWN').map(f => f.location), ['/images/0', '/images/1']);
+    assert.equal(r.proof.godotImport.complete, false);
+    assert.equal(r.proof.godotImport.status, godotImport ? 'error' : 'not_requested');
+    if (godotImport) assert.ok(r.findings.some(f => f.code === 'ASSET_IMPORT_FAILED' && /static validation failed/.test(f.message)));
+  }
+  const cli = await runCli(['asset', 'validate', 'res://model.gltf', '--project', project, '--policy', 'res://policy.json']);
+  assert.equal(cli.code, 1, cli.stdout + cli.stderr);
+  assert.equal(JSON.parse(cli.stdout).policy.passed, false);
+});
+
+test("image dimension policy accepts measured boundaries and image-free assets", async (t) => {
+  const project = await createProject(t);
+  // Header-only fixture: dimensions evidence, deliberately not a decoded image.
+  const png = Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,
+    0,0,0,13,0x49,0x48,0x44,0x52,0,0,0,2,0,0,0,3]);
+  await fs.writeFile(path.join(project, 'image.png'), png);
+  for (const images of [[], [{ uri: 'image.png' }]]) {
+    await fs.writeFile(path.join(project, 'model.gltf'), JSON.stringify({ asset: { version: '2.0' }, images }));
+    for (const limit of [2, 3]) {
+      await fs.writeFile(path.join(project, 'policy.json'), JSON.stringify({ schema: 'uo-godot-asset-policy/1', max_image_dimension: limit }));
+      const r = await validateAsset({ project, asset: 'res://model.gltf', policy: 'res://policy.json', env: {} });
+      assert.equal(r.valid, images.length === 0 || limit === 3);
+      assert.equal(r.policy.passed, r.valid);
+      if (!r.valid) assert.ok(r.findings.some(f => f.code === 'ASSET_POLICY_LIMIT'));
+      assert.ok(!r.findings.some(f => f.code === 'ASSET_POLICY_MEASUREMENT_UNKNOWN'));
+    }
+  }
+});
+
+test("GLB validation rejects ambiguous framing with a stable error code", async (t) => {
+  const project = await createProject(t);
+  const wrongMagic = buildGlb({ asset: { version: "2.0" } });
+  wrongMagic.writeUInt32LE(0, 0);
+  const wrongLength = buildGlb({ asset: { version: "2.0" } });
+  wrongLength.writeUInt32LE(wrongLength.length + 4, 8);
+  const unknownChunk = buildGlb({ asset: { version: "2.0" } });
+  unknownChunk.writeUInt32LE(0x12345678, 16);
+
+  for (const [name, bytes] of [
+    ["wrong-magic.glb", wrongMagic],
+    ["wrong-length.glb", wrongLength],
+    ["unknown-chunk.glb", unknownChunk],
+  ]) {
+    await fs.writeFile(path.join(project, name), bytes);
+    const report = await validateAsset({ project, asset: `res://${name}`, env: {} });
+    assert.equal(report.status, "error", name);
+    assert.equal(report.findings[0].code, "ASSET_GLB_INVALID", name);
+    assert.equal(report.integrity.unchanged, true, name);
+  }
+});
+
+test("asset policy rejects unknown fields and inconsistent collision requirements", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "model.gltf"),
+    JSON.stringify({ asset: { version: "2.0" } }),
+    "utf8"
+  );
+  const policies = [
+    { schema: "uo-godot-asset-policy/1", surprise: true },
+    {
+      schema: "uo-godot-asset-policy/1",
+      require_collision_nodes: true,
+      require_godot_import: false,
+    },
+  ];
+
+  for (const [index, policy] of policies.entries()) {
+    const name = `invalid-policy-${index}.json`;
+    await fs.writeFile(path.join(project, name), JSON.stringify(policy), "utf8");
+    const report = await validateAsset({
+      project,
+      asset: "res://model.gltf",
+      policy: `res://${name}`,
+      env: {},
+    });
+    assert.equal(report.status, "error", name);
+    assert.ok(
+      report.findings.some((finding) => finding.code === "ASSET_POLICY_INVALID"),
+      name
+    );
+  }
+});
+
+test("asset validate CLI emits JSON and preserves validation exit status", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "good.gltf"),
+    JSON.stringify({ asset: { version: "2.0" } }),
+    "utf8"
+  );
+  await fs.writeFile(path.join(project, "bad.gltf"), "{", "utf8");
+
+  const good = await runCli([
+    "asset",
+    "validate",
+    "res://good.gltf",
+    "--project",
+    project,
+  ]);
+  assert.equal(good.code, 0, `${good.stdout}\n${good.stderr}`);
+  assert.equal(good.stderr, "");
+  assert.equal(JSON.parse(good.stdout).status, "ok");
+
+  const bad = await runCli([
+    "asset",
+    "validate",
+    "res://bad.gltf",
+    "--project",
+    project,
+  ]);
+  assert.equal(bad.code, 1, `${bad.stdout}\n${bad.stderr}`);
+  assert.equal(bad.stderr, "");
+  assert.equal(JSON.parse(bad.stdout).status, "error");
+});
+
+test("static validation rejects malformed glTF array containers", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "containers.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      scenes: {},
+      nodes: "not-an-array",
+      meshes: 7,
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://containers.gltf",
+    env: {},
+  });
+  assert.equal(report.status, "error");
+  assert.deepEqual(
+    report.findings
+      .filter((finding) => finding.code === "ASSET_CONTAINER_INVALID")
+      .map((finding) => finding.location),
+    ["/meshes", "/nodes", "/scenes"]
+  );
+});
+
+test("static validation rejects malformed nested glTF array containers", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "nested-containers.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      scenes: [{ nodes: {} }],
+      nodes: [{ children: "not-an-array" }],
+      meshes: [{ primitives: {} }],
+      skins: [{ joints: {} }],
+      animations: [{ samplers: {}, channels: "not-an-array" }],
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://nested-containers.gltf",
+    env: {},
+  });
+  assert.equal(report.status, "error");
+  assert.deepEqual(
+    report.findings
+      .filter((finding) => finding.code === "ASSET_CONTAINER_INVALID")
+      .map((finding) => finding.location),
+    [
+      "/animations/0/channels",
+      "/animations/0/samplers",
+      "/meshes/0/primitives",
+      "/nodes/0/children",
+      "/scenes/0/nodes",
+      "/skins/0/joints",
+    ]
+  );
+});
+
+test("asset and dependency paths reject traversal segments even when normalization stays inside", async (t) => {
+  const project = await createProject(t);
+  await fs.mkdir(path.join(project, "sub"));
+  await fs.writeFile(path.join(project, "mesh.bin"), Buffer.alloc(1));
+  await fs.writeFile(
+    path.join(project, "model.gltf"),
+    JSON.stringify({
+      asset: { version: "2.0" },
+      buffers: [{ uri: "sub/../mesh.bin", byteLength: 1 }],
+    }),
+    "utf8"
+  );
+
+  await assert.rejects(
+    () =>
+      validateAsset({
+        project,
+        asset: "res://sub/../model.gltf",
+        env: {},
+      }),
+    /traversal/
+  );
+  const report = await validateAsset({
+    project,
+    asset: "res://model.gltf",
+    env: {},
+  });
+  assert.equal(report.status, "error");
+  assert.ok(
+    report.findings.some((finding) => finding.code === "ASSET_URI_FORBIDDEN")
+  );
+});
+
+test("policy requiring Godot import fails when the requested import is incomplete", async (t) => {
+  const project = await createProject(t);
+  await fs.writeFile(
+    path.join(project, "model.gltf"),
+    JSON.stringify({ asset: { version: "2.0" } }),
+    "utf8"
+  );
+  await fs.writeFile(
+    path.join(project, "policy.json"),
+    JSON.stringify({
+      schema: "uo-godot-asset-policy/1",
+      require_godot_import: true,
+    }),
+    "utf8"
+  );
+
+  const report = await validateAsset({
+    project,
+    asset: "res://model.gltf",
+    policy: "res://policy.json",
+    godotImport: true,
+    godot: path.join(project, "missing-godot.exe"),
+    timeoutMs: 100,
+    env: {},
+  });
+  assert.equal(report.status, "error");
+  assert.equal(report.proof.godotImport.status, "error");
+  assert.equal(report.policy.passed, false);
+});

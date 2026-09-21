@@ -1,0 +1,22 @@
+; Minimal runtime fixture for security and protocol smoke tests.
+; The production Ultimate Odycer client is intentionally not modified here.
+config_version=5
+
+[application]
+
+config/name="Godot CLI Security Fixture"
+run/main_scene="res://test_scene.tscn"
+
+[autoload]
+
+GodotCLI="*res://addons/godot_cli/cli_server.gd"
+
+[display]
+
+window/size/viewport_width=320
+window/size/viewport_height=180
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[node name="SecurityFixture" type="Node"]
+
+[node name="Probe" type="Node2D" parent="."]
+metadata/status = "ready"
