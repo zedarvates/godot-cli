@@ -29,7 +29,7 @@ This repository is Ultimate Odycer's security-focused fork of [mattias800/godot-
 
 The executable is named **`uo-godot-cli`** to avoid colliding with the unrelated `godot-cli` package from [IvanMurzak/Godot-MCP](https://github.com/IvanMurzak/Godot-MCP).
 
-[Why this fork](#why-this-fork) · [Architecture](#architecture) · [Quick start](#quick-start) · [Command guide](#command-guide) · [Security modes](#security-modes) · [Validation evidence](#validation-evidence)
+[Why this fork](#why-this-fork) · [Architecture](#architecture) · [Quick start](#quick-start) · [MCP](#mcp-stdio-server) · [Command guide](#command-guide) · [Security modes](#security-modes) · [Validation evidence](#validation-evidence)
 
 The [Ultimate Odycer client integration roadmap](docs/ultimate-odycer-client-roadmap.md)
 maps the ten audit areas to current tooling, client/server responsibilities,
@@ -41,6 +41,7 @@ and the evidence required for the next integration gates.
 - **Fail-closed compatibility:** `doctor` verifies the protocol, addon version, Godot 4.7 runtime, endpoint, limits, and capability gates.
 - **Deterministic output:** commands return structured JSON and non-zero exit codes on failed gates or assertions.
 - **Bounded inspection:** scene traversal, files, messages, responses, clients, waits, and assertions have explicit limits.
+- **Focused MCP tools:** a small stdio catalog reuses the authenticated client, requires explicit property selections, and bounds concurrent reads.
 - **No silent activation:** the installer never edits `project.godot` or enables the plugin/autoload.
 - **Project-aware preflight:** local discovery and static checks run without starting Godot or requiring a runtime token.
 - **Catalog compatibility audit:** compares the bundled CLI manifest with the installed `godot_ai` catalog and requires review for every missing or unmapped capability.
@@ -54,6 +55,7 @@ and the evidence required for the next integration gates.
 |---|---|---:|---:|
 | Audit a project before touching it | `project preflight` | No | No |
 | Compare CLI and `godot_ai` capabilities | `project compatibility` | No | Only with `--live` |
+| Connect an MCP agent to a running debug scene | `mcp serve` | No | Yes |
 | Inspect one addon-manifest v1 file | `mod manifest inspect` | No | No |
 | Inspect one captured replication frame | `network replication inspect` | No | No |
 | Inspect one captured client VR request | `network vr-request inspect` | No | No |
@@ -65,7 +67,7 @@ and the evidence required for the next integration gates.
 
 ```mermaid
 flowchart LR
-    User["Developer or coding agent"] --> CLI["uo-godot-cli<br/>Node.js 18+"]
+    User["Developer or coding agent"] --> CLI["uo-godot-cli<br/>Node.js 18.14.1+"]
 
     CLI -->|"bounded local commands"| Local["Project discovery,<br/>preflight, addon installer"]
     Local --> Files["Godot project files"]
@@ -95,7 +97,8 @@ The runtime addon exposes 34 protocol commands. `uo-godot-cli commands` returns 
 
 - Godot **4.7.x** debug build; public CI uses **4.7.1 stable** and the full
   local Fovea integration gate currently uses **4.7-dev5**.
-- Node.js **18 or newer**.
+- Node.js **18.14.1 or newer**. The MCP SDK's Node 18-compatible dependency
+  requires this patch-level minimum; the CLI does not require Node 20.
 - A fresh `GODOT_CLI_TOKEN` containing at least 32 characters.
 - The same token environment must be present when Godot starts and when the CLI connects.
 
@@ -189,6 +192,70 @@ uo-godot-cli scene-tree --depth 3
 ```
 
 `doctor` rejects protocol/addon mismatches, non-4.7 engines, release builds, non-loopback endpoints, unexpected limits, or elevated gates. Use `doctor --allow-elevated` only when you intentionally enabled a mutation or unsafe session.
+
+## MCP stdio server
+
+After building this checkout and starting the existing GodotCLI addon in a
+debug scene, an MCP client can launch:
+
+```bash
+uo-godot-cli --host 127.0.0.1 --port 9900 mcp serve
+```
+
+For clients with a `mcpServers` configuration, a direct Node launcher avoids
+depending on a global executable. Replace the script path with your checkout:
+
+```json
+{
+  "mcpServers": {
+    "godot": {
+      "command": "node",
+      "args": ["/absolute/path/to/godot-cli/dist/cli.js", "mcp", "serve"]
+    }
+  }
+}
+```
+
+The launching client must pass the runtime's `GODOT_CLI_TOKEN` to the subprocess
+through its secure environment mechanism. Some clients filter inherited
+environment variables. Do not put the token in arguments or saved configuration.
+The server itself never starts Godot, enables an addon, or edits the project.
+Stdout is reserved for MCP JSON messages; startup/session failures use stderr.
+
+| Tool | Read behavior |
+| --- | --- |
+| `godot_doctor` | Existing protocol, engine, debug-build, limits and safety checks; run first |
+| `godot_get_node` | Required `path` and 1–32 exact `properties`; identity and selected values only |
+| `godot_ping` | Authenticated readiness probe |
+| `godot_scene_tree` | Optional `root`; depth defaults to 2, accepts 0–8; truncated traversal fails |
+| `godot_validate_scene` | Structural diagnostics; invalid or incomplete checks are tool errors |
+| `godot_viewport_info` | Live viewport and engine metrics |
+
+For example, call `godot_get_node` with
+`{"path":"/root/Main/Player","properties":["position","velocity"]}`.
+Missing properties fail rather than returning partial data or a full-node
+fallback. Selection is client-side: it reduces returned agent context but does
+not reduce addon work or the TCP response. No billed-token or speed saving is
+claimed. Existing shell commands and addon protocol remain available.
+
+This bridge exposes only these six read tools, even if the runtime has elevated
+gates enabled. It has no generic command forwarding, mutations, file writes,
+LLM sampling, asset generation or agent orchestration. There is no HTTP
+listener and no additional paid service. Parcimonia/JEV routing remains a
+separate integration rather than a hidden model call inside this connector.
+
+Each session accepts at most four concurrent Godot reads and eight pending MCP
+requests. Busy reads fail immediately without a queue or automatic retry.
+Read deadlines are 10 seconds; cancellation and stdin EOF close owned runtime
+sockets. Input buffering is capped at 64 KiB, tool result JSON at 64 KiB, and
+Godot responses at 1 MiB. Narrow the query after a size error. See
+[SECURITY.md](SECURITY.md#mcp-stdio-boundary) for the remaining limits.
+
+The bridge uses the official MIT-licensed MCP TypeScript SDK 1.32.0. Tests
+negotiate the legacy MCP versions `2025-11-25` and `2025-06-18`; support for
+the newer stateless protocol is not claimed. A direct dependency pin
+selects the SDK's supported `@hono/node-server` 1.19.17 range for Node 18
+compatibility; its HTTP transport is not used by this stdio bridge.
 
 ## Security modes
 
@@ -584,6 +651,7 @@ uo-godot-cli commands
 ```bash
 uo-godot-cli scene-tree --root /root/Main --depth 3
 uo-godot-cli get-node /root/Main/Player
+uo-godot-cli get-node /root/Main/Player --properties position velocity
 uo-godot-cli visible-nodes --type Control
 uo-godot-cli viewport-info
 uo-godot-cli validate-scene
@@ -591,6 +659,17 @@ uo-godot-cli screenshot --output gameplay.png
 ```
 
 `validate-scene` is fail-closed. Traversal is limited to 4,096 nodes and depth 64; truncation returns `complete: false`, `valid: false`, and `validation_budget_exceeded`.
+
+For agent workflows, `get-node --properties <names...>` returns only the exact
+requested properties plus node identity and selection metadata. It accepts
+1–32 unique names, each at most 128 UTF-8 bytes. A missing property or malformed
+node result fails the command without returning partial or unrelated context.
+Omitting the option keeps the existing full inspection response.
+
+Selection happens in the CLI after the existing bounded `get_node` response:
+this reduces the JSON supplied to the agent, not the addon work or TCP bytes.
+It needs no new addon protocol, model, service, mutation gate, or dependency.
+No token-cost or latency improvement has been benchmarked.
 
 ### Structured checks
 
@@ -757,7 +836,7 @@ Headless Godot can exit successfully while still logging a script or resource er
 - The same-day canonical `Login.tscn` replay is not promoted because the client reports missing planet, generated-building, and audio resources plus invalid UIDs independently of this addon.
 - Static UID discovery cannot validate Godot's binary UID cache; a real runtime scene-load gate is still required.
 - The Fovea GDScript fallback proves the bridge contract, not native extension, GPU rendering, visual quality, collision quality, or OpenXR behavior.
-- This branch does not ship the unbounded stdio MCP prototype found on other branches. Shell commands and the authenticated TCP protocol remain the supported interfaces.
+- This branch ships a bounded, read-only `mcp serve` adapter over the existing authenticated TCP client. It does not ship the unbounded MCP prototype from other branches or expose mutation tools through MCP.
 
 ## Troubleshooting
 
