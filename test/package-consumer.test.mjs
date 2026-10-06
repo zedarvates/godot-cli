@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fixture, TEMPLATE, specDigest } from "./helpers/template-validation-fixture.mjs";
 
 const PACKAGE_ROOT = fileURLToPath(new URL("../", import.meta.url));
@@ -72,17 +74,51 @@ test("packed CLI installs and manages its addon outside the source tree", async 
 
   const cliArchive = packPackage(PACKAGE_ROOT, temporaryRoot);
   const lock = JSON.parse(await fs.readFile(path.join(PACKAGE_ROOT, "package-lock.json"), "utf8"));
-  const dependencyArchives = [];
-  for (const [resource, entry] of Object.entries(lock.packages)) {
-    if (!resource || entry.dev) continue;
-    assert.match(resource, /^node_modules\/(?:@[^/]+\/)?[^/]+$/, "Offline fixture requires a flat production dependency tree");
-    dependencyArchives.push(packPackage(path.join(PACKAGE_ROOT, resource), temporaryRoot));
-  }
-
   const consumer = path.join(temporaryRoot, "consumer");
   const project = path.join(temporaryRoot, "godot-project");
   await fs.mkdir(consumer);
   await fs.mkdir(project);
+
+  // Seed the isolated consumer with the production dependency tree. Nested
+  // versions are normal; packing each version as a root install would collapse
+  // distinct versions and require registry metadata in this offline fixture.
+  // No source files, dev dependencies or links back to the checkout are copied.
+  for (const [resource, entry] of Object.entries(lock.packages)) {
+    if (!resource || entry.dev) continue;
+    assert.match(resource, /^node_modules\/(?:@[^/]+\/)?[^/]+(?:\/node_modules\/(?:@[^/]+\/)?[^/]+)*$/);
+    if (!/^node_modules\/(?:@[^/]+\/)?[^/]+$/.test(resource)) continue;
+    await fs.cp(path.join(PACKAGE_ROOT, resource), path.join(consumer, resource), { recursive: true, dereference: true });
+    // npm treats a missing declared bin as an incomplete installation and
+    // would refetch its package despite an otherwise complete offline tree.
+    for (const name of Object.keys(entry.bin ?? {})) {
+      for (const suffix of ["", ".cmd", ".ps1"]) {
+        const sourceBin = path.join(PACKAGE_ROOT, "node_modules", ".bin", name + suffix);
+        try {
+          await fs.lstat(sourceBin);
+          await fs.cp(sourceBin, path.join(consumer, "node_modules", ".bin", name + suffix), { dereference: false, verbatimSymlinks: true });
+        } catch (error) { if (error.code !== "ENOENT") throw error; }
+      }
+    }
+  }
+  const consumerManifest = {
+    name: "godot-consumer-fixture", version: "1.0.0", private: true,
+    dependencies: { [sourceManifest.name]: `file:${cliArchive}` },
+  };
+  const { devDependencies, ...cliEntry } = lock.packages[""];
+  const consumerLock = {
+    name: consumerManifest.name, version: consumerManifest.version,
+    lockfileVersion: 3, requires: true,
+    packages: {
+      "": consumerManifest,
+      ...Object.fromEntries(Object.entries(lock.packages).filter(([resource, entry]) => resource && !entry.dev)),
+      [`node_modules/${sourceManifest.name}`]: {
+        ...cliEntry, resolved: `file:${cliArchive}`,
+        integrity: `sha512-${createHash("sha512").update(await fs.readFile(cliArchive)).digest("base64")}`,
+      },
+    },
+  };
+  await fs.writeFile(path.join(consumer, "package.json"), JSON.stringify(consumerManifest));
+  await fs.writeFile(path.join(consumer, "package-lock.json"), JSON.stringify(consumerLock));
 
   runNpm(
     [
@@ -93,8 +129,6 @@ test("packed CLI installs and manages its addon outside the source tree", async 
       "--no-audit",
       "--no-fund",
       "--no-save",
-      "--package-lock=false",
-      ...dependencyArchives,
       cliArchive,
     ],
     consumer
@@ -123,6 +157,23 @@ test("packed CLI installs and manages its addon outside the source tree", async 
     runInstalledCli(cliPath, ["--version"], consumer),
     sourceManifest.version
   );
+
+  const mcp = new Client({ name: "packed-cli-consumer", version: "1.0.0" });
+  const transport = new StdioClientTransport({
+    command: process.execPath, args: [cliPath, "mcp", "serve"], cwd: consumer,
+    env: { ...process.env, GODOT_CLI_TOKEN: "isolated-package-fixture-".padEnd(64, "x") },
+    stderr: "pipe",
+  });
+  let mcpErrors = "";
+  transport.stderr.on("data", (chunk) => { mcpErrors += chunk.toString(); });
+  try {
+    await mcp.connect(transport);
+    const catalog = await mcp.listTools();
+    assert.deepEqual(catalog.tools.map((tool) => tool.name), [
+      "godot_doctor", "godot_get_node", "godot_ping", "godot_scene_tree", "godot_validate_scene", "godot_viewport_info",
+    ]);
+    assert.equal(mcpErrors, "");
+  } finally { await mcp.close(); }
 
   const addonManifestFile = path.join(temporaryRoot, "addon-manifest.json");
   const addonManifestBytes = Buffer.from(JSON.stringify({
