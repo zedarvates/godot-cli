@@ -8,6 +8,7 @@ const DEFAULT_PORT = 9900;
 const DEFAULT_MAX_REQUEST_BYTES = 1 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MIN_TOKEN_LENGTH = 32;
+const MAX_PENDING_HOST_LOOKUPS = 4;
 
 export interface GodotResponse {
   id: string;
@@ -85,6 +86,7 @@ export class GodotClient {
   private maxRequestBytes: number;
   private maxResponseBytes: number;
   private hostResolver: HostResolver;
+  private pendingHostLookups = 0;
 
   constructor(options: GodotClientOptions = {}) {
     this.host = options.host?.trim() || DEFAULT_HOST;
@@ -131,12 +133,22 @@ export class GodotClient {
   private async resolveConnectHost(): Promise<string> {
     if (this.host.toLowerCase() !== "localhost") return this.host;
 
+    if (this.pendingHostLookups >= MAX_PENDING_HOST_LOOKUPS) {
+      throw new Error("Pending hostname lookup budget exceeded.");
+    }
+    this.pendingHostLookups++;
+
     let results: readonly ResolvedHost[];
     try {
       results = await this.hostResolver(this.host);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Cannot resolve loopback host '${this.host}': ${message}`);
+    } finally {
+      // A cancelled caller cannot cancel Node's underlying DNS work. Keep that
+      // work charged until it really settles so repeated cancellations cannot
+      // create an unbounded native lookup queue.
+      this.pendingHostLookups--;
     }
 
     if (results.length === 0 || results.some(({ address }) => !isLoopbackAddress(address))) {
@@ -151,8 +163,10 @@ export class GodotClient {
   async send(
     command: string,
     params: Record<string, unknown> = {},
-    timeoutMs: number = 10000
+    timeoutMs: number = 10000,
+    signal?: AbortSignal,
   ): Promise<GodotResponse> {
+    if (signal?.aborted) throw new Error("Godot request cancelled or timed out.");
     const id = randomUUID();
     const message =
       JSON.stringify({ id, token: this.token, command, params }) + "\n";
@@ -163,7 +177,23 @@ export class GodotClient {
       );
     }
 
-    const connectHost = await this.resolveConnectHost();
+    let cancelLookup: (() => void) | undefined;
+    let connectHost: string;
+    try {
+      const lookup = this.resolveConnectHost();
+      connectHost = signal
+        ? await Promise.race([
+            lookup,
+            new Promise<never>((_, reject) => {
+              cancelLookup = () => reject(new Error("Godot request cancelled or timed out."));
+              signal.addEventListener("abort", cancelLookup, { once: true });
+              if (signal.aborted) cancelLookup();
+            }),
+          ])
+        : await lookup;
+    } finally {
+      if (cancelLookup) signal?.removeEventListener("abort", cancelLookup);
+    }
 
     return new Promise((resolve, reject) => {
       const socket = new net.Socket();
@@ -171,11 +201,16 @@ export class GodotClient {
       let buffer = "";
       let responseBytes = 0;
       let settled = false;
+      const cancel = (): void => fail(new Error("Godot request cancelled or timed out."));
+      const cleanup = (): void => {
+        clearTimeout(timeout);
+        signal?.removeEventListener("abort", cancel);
+      };
 
       const fail = (error: Error): void => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
+        cleanup();
         socket.destroy();
         reject(error);
       };
@@ -183,6 +218,12 @@ export class GodotClient {
       const timeout = setTimeout(() => {
         fail(new Error("Connection timed out"));
       }, timeoutMs);
+
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) {
+        cancel();
+        return;
+      }
 
       socket.connect(this.port, connectHost, () => {
         socket.setNoDelay(true);
@@ -207,7 +248,7 @@ export class GodotClient {
           try {
             const response = parseResponse(line, id);
             settled = true;
-            clearTimeout(timeout);
+            cleanup();
             socket.destroy();
             resolve(response);
           } catch (error) {

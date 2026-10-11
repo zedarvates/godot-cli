@@ -83,6 +83,61 @@ including numeric annotations and constants. A source bound such as
   to 4 MiB and directory listings to 4,096 entries.
 - Inspection, structured assertions and captures are available by default.
 
+## MCP stdio boundary
+
+`uo-godot-cli mcp serve` is a local stdio adapter, not a second Godot control
+plane or an HTTP service. It uses the existing loopback-only `GodotClient`
+and authenticates every runtime request with the environment token. Token
+input is limited to 32 or more characters and at most 4,096 UTF-8 bytes.
+Stdout contains only MCP messages. Protocol parser errors never echo input;
+token matches in returned JSON, including JSON-escaped forms, are redacted.
+An incoming MCP message containing the runtime token closes the session.
+
+The six advertised tools are read-only and have closed argument schemas.
+Ajv validates types, ranges and extra fields without coercion or defaults;
+node paths and selected property names have additional UTF-8 byte checks.
+The adapter never forwards arbitrary command names, asks for LLM sampling,
+enables a capability gate, starts a runtime, or changes project files.
+`godot_doctor` reuses the existing compatibility and safety report, with no
+elevated-gate bypass. Other tools are still limited to reads if gates are on.
+
+- The official SDK handles legacy MCP initialization and stdio framing.
+  Tool calls and discovery require the initialized notification. There is
+  no paginated catalog, task creation, result cache, retry loop or read queue.
+- SDK stdin buffering is capped at 64 KiB, including partial messages.
+  Parsed messages/results have a 24-level depth and 16,384-value budget.
+- At most eight unanswered MCP requests are retained. Duplicate IDs,
+  non-safe numeric IDs, string IDs over 128 UTF-8 bytes, or overflow close
+  the session before more requests are dispatched.
+- At most four Godot reads may be active. Excess reads return a tool error;
+  they do not wait in a queue or trigger an automatic retry.
+- Each read has a 10-second deadline covering the adapter's wait, including
+  hostname lookup. Cancellation closes the corresponding TCP socket.
+  Stdin EOF, SIGINT or SIGTERM cancels owned reads and closes the session.
+  A client retains at most four unresolved `localhost` lookups; cancelled
+  reads keep underlying DNS work charged until it actually settles.
+- Authenticated TCP input is bounded to 64 KiB per request and 1 MiB per
+  response here, lower than the ordinary CLI's existing ceilings.
+- Tool result JSON is limited to 64 KiB; an entire framed MCP response is
+  limited to 256 KiB, including escaping. Pending output is capped at
+  512 KiB; each write has a five-second deadline. Excess output is rejected
+  rather than clipped and reported as success.
+  The CLI process exits when its MCP session closes, including a blocked
+  stdout pipe; the transport's write promise alone cannot close Node's stdout.
+- `godot_get_node` requires an exact 1–32 property selection. Missing
+  properties and malformed node identity fail without returning full context.
+  Selection happens after the bounded TCP response; the addon still enumerates
+  and serializes its normal node data.
+- MCP scene depth is limited to 0–8 with default 2. A runtime traversal
+  truncation or incomplete scene validation cannot report tool success.
+  Invalid but complete scene validation returns its diagnostics with
+  `isError: true`.
+
+This is an inspection connector, not a multi-agent scheduler or an engine
+transaction system. Concurrent reads may observe different runtime frames.
+No remote MCP listener, local model backend or billed generation service is
+provided. Real-engine testing is a separate gate from the MCP transport fixtures.
+
 ## Capability gates
 
 `GODOT_CLI_ALLOW_MUTATIONS=1` enables runtime mutations such as changing node

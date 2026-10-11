@@ -7,6 +7,20 @@ pre-release versions until the public API and operational boundary are stable.
 
 ### Added
 
+- `mcp serve` exposes six focused read-only tools over bounded stdio, using the
+  existing authenticated loopback client and exact node-property selection.
+  Closed argument schemas, output limits, four concurrent reads, cancellation,
+  EOF cleanup and finite deadlines keep discovery and inspection bounded.
+  The official MCP SDK 1.32.0 negotiates legacy MCP; no model calls, write tools,
+  automatic retries, new engine listener or agent scheduler are introduced.
+  Node's minimum becomes 18.14.1, with an explicit SDK dependency pin to keep
+  the stdio installation compatible with Node 18 rather than requiring Node 20.
+
+- `get-node --properties <names...>` selects 1–32 exact properties for focused
+  agent context, preserving node identity and rejecting missing selections.
+  Existing full inspection and the addon protocol are unchanged; selection is
+  client-side and makes no runtime-speed or billed-token saving claim.
+
 - Allow a lower dependency closure budget with `template validate
   --with-dependencies --max-templates` (1-128, including the root). Exhaustion
   now reports `TEMPLATE_CLOSURE_LIMIT` and remains incomplete.
@@ -16,6 +30,9 @@ pre-release versions until the public API and operational boundary are stable.
   validation. The default remains 120000 ms; expiration fails closed.
 
 ### Fixed
+
+- Update the transitive `fast-uri` lockfile entry from 3.1.7 to 3.1.8 for
+  GHSA-hrr3-gc8f-f4qj, without changing the dependency range or adding a package.
 
 - Assemble short image-header reads up to the existing 64 KiB limit instead
   of incorrectly treating readable PNG/JPEG dimensions as unknown.

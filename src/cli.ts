@@ -36,6 +36,7 @@ import { listTestProfiles, runTestProfile } from "./test-runner.js";
 import { inspectModManifest } from "./mod-manifest-inspection.js";
 import { inspectReplicationFrame } from "./network-replication-inspection.js";
 import { inspectVrRequestFrame } from "./network-vr-request-inspection.js";
+import { selectNodeProperties, validatePropertySelection } from "./node-inspection.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -66,7 +67,11 @@ function parseValue(str: string): unknown {
 async function run(
   command: string,
   params: Record<string, unknown> = {},
-  options: { timeoutMs?: number; exitOnFail?: (data: Record<string, unknown>) => boolean } = {}
+  options: {
+    timeoutMs?: number;
+    exitOnFail?: (data: Record<string, unknown>) => boolean;
+    projectResponse?: (response: GodotResponse) => GodotResponse;
+  } = {}
 ): Promise<void> {
   const opts = program.opts();
   const client = new GodotClient({ host: opts.host, port: opts.port });
@@ -80,7 +85,8 @@ async function run(
       process.stdout.write(JSON.stringify(response, null, 2) + "\n");
       process.exit(1);
     }
-    process.stdout.write(JSON.stringify(response, null, 2) + "\n");
+    const output = options.projectResponse ? options.projectResponse(response) : response;
+    process.stdout.write(JSON.stringify(output, null, 2) + "\n");
     // Allow commands to exit non-zero based on response data
     if (
       options.exitOnFail &&
@@ -105,6 +111,9 @@ All commands output JSON. Requires the GodotCLI addon enabled in your Godot proj
 GODOT_CLI_TOKEN (32+ characters) must be set for both Godot and this CLI.
 
 Options: --host <host> (loopback only)  --port <port> (default: 9900)
+
+MCP SERVER (stdio; token required; six read-only tools)
+  mcp serve                                Connect an agent to the existing addon
 
 ADDON MANAGEMENT
   addon status <project>                    Inspect installation and coexistence
@@ -156,7 +165,7 @@ SCENE TREE
   save-scene [--path PATH]                  Save current scene to .tscn file
 
 NODE OPERATIONS
-  get-node <path>                           Get ALL properties of a node
+  get-node <path> [--properties A B]        Get all or only selected node properties
   set-property <path> <prop> <value>        Set a property (supports Vector2, Color, etc.)
   add-node <parent> [type] [--script PATH]  Create a live node; scripted creation runs _ready()
   remove-node <path>                        Remove a node from the tree
@@ -866,6 +875,26 @@ addon
 // ---------------------------------------------------------------------------
 
 program
+  .command("mcp")
+  .description("Expose focused read-only Godot tools to an MCP client over stdio")
+  .command("serve")
+  .description("Serve MCP on stdin/stdout; inherit GODOT_CLI_TOKEN from the environment")
+  .action(async () => {
+    try {
+      // Ordinary CLI commands do not load the MCP SDK.
+      const { serveGodotMcp } = await import("./mcp-server.js");
+      const opts = program.opts();
+      await serveGodotMcp({ host: opts.host, port: opts.port });
+    } catch (error) {
+      process.stderr.write(`Error: ${error instanceof Error ? error.message : "Godot MCP server failed."}\n`);
+      process.exitCode = 1;
+    }
+    // The MCP session owns this CLI process. Node's stdout cannot be closed
+    // with destroy(); blocked pipe writes must not keep a closed session alive.
+    process.exit(process.exitCode ?? 0);
+  });
+
+program
   .command("scene-tree")
   .description("Get the scene tree hierarchy")
   .option("--depth <depth>", "Maximum depth", "10")
@@ -912,10 +941,22 @@ program
 
 program
   .command("get-node")
-  .description("Get all properties of a node")
+  .description("Get all or an exact selection of node properties")
   .argument("<path>", "Node path (e.g. /root/Main/Player)")
-  .action(async (nodePath: string) => {
-    await run("get_node", { path: nodePath });
+  .option("--properties <names...>", "Return only these exact properties (1–32 names)")
+  .action(async (nodePath: string, opts: { properties?: string[] }) => {
+    if (opts.properties === undefined) {
+      await run("get_node", { path: nodePath });
+      return;
+    }
+    try {
+      const selection = validatePropertySelection(opts.properties);
+      await run("get_node", { path: nodePath }, {
+        projectResponse: (response) => selectNodeProperties(response, selection),
+      });
+    } catch (error) {
+      reportLocalError(error);
+    }
   });
 
 program
